@@ -1,7 +1,7 @@
 package raster
 
 import (
-	"tec/image/fixed"
+	"github.com/agilecho/tec/image/fixed"
 	"fmt"
 	"math"
 )

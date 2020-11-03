@@ -3,10 +3,10 @@ package mysql
 const defaultCollation = "utf8mb4_general_ci"
 const binaryCollation = "binary"
 
-var collations = map[string]byte {
-	"big5_chinese_ci": 1,
-	"latin2_czech_cs": 2,
-	"dec8_swedish_ci": 3,
+var collations = map[string]byte{
+	"big5_chinese_ci":      1,
+	"latin2_czech_cs":      2,
+	"dec8_swedish_ci":      3,
 	"cp850_general_ci":     4,
 	"latin1_german1_ci":    5,
 	"hp8_english_ci":       6,
@@ -149,7 +149,7 @@ var collations = map[string]byte {
 	"utf8mb4_0900_ai_ci":       255,
 }
 
-var unsafeCollations = map[string]bool {
+var unsafeCollations = map[string]bool{
 	"big5_chinese_ci":        true,
 	"sjis_japanese_ci":       true,
 	"gbk_chinese_ci":         true,

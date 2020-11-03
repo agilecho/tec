@@ -1,13 +1,13 @@
 package mq
 
 import (
-	"tec/mq/amqp"
-	"tec/mq/beanstalk"
 	"crypto/md5"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"github.com/agilecho/tec/mq/amqp"
+	"github.com/agilecho/tec/mq/beanstalk"
 	"io"
 	"os"
 	"strconv"
@@ -57,6 +57,8 @@ type Message struct {
 	Body string
 }
 
+type ReserveMessageFunc func(handle MQ, msg *Message)
+
 type MQ interface {
 	Connect()
 	Close()
@@ -64,7 +66,7 @@ type MQ interface {
 	FanoutTube(tube string)
 	Put(data string, level uint32, delay time.Duration) interface{}
 	Watch(tube string)
-	Reserve(timeout time.Duration) *Message
+	Reserve(fun ReserveMessageFunc)
 	Delete(message *Message) bool
 }
 
@@ -128,6 +130,10 @@ func (this *rabbitMQ) Connect() {
 }
 
 func (this *rabbitMQ) Close() {
+	if this.handle == nil {
+		return
+	}
+
 	if !this.handle.IsClosed() {
 		this.handle.Close()
 		this.channel.Close()
@@ -135,6 +141,10 @@ func (this *rabbitMQ) Close() {
 }
 
 func (this *rabbitMQ) UseTube(tube string) {
+	if this.handle == nil {
+		return
+	}
+
 	this.tube = tube
 	this.exchange = this.config.Exchange
 
@@ -152,6 +162,10 @@ func (this *rabbitMQ) UseTube(tube string) {
 }
 
 func (this *rabbitMQ) FanoutTube(tube string) {
+	if this.handle == nil {
+		return
+	}
+
 	this.tube = tube
 	this.exchange = this.config.Exchange + ".fanout"
 
@@ -168,8 +182,31 @@ func (this *rabbitMQ) FanoutTube(tube string) {
 	}
 }
 
+func (this *rabbitMQ) Watch(tube string) {
+	if this.channel == nil {
+		return
+	}
+
+	var err error
+	this.queue, err = this.channel.QueueDeclare(this.exchange + "." + this.tube, true, false, false, false, nil)
+	if err != nil {
+		this.log("mq.rabbitMQ.Watch.QueueDeclare error:" + err.Error())
+		return
+	}
+
+	err = this.channel.QueueBind(this.exchange + "." + this.tube, this.tube, this.exchange, true, nil)
+	if err != nil {
+		this.log("mq.rabbitMQ.Watch.QueueBind error:" + err.Error())
+		return
+	}
+}
+
 func (this *rabbitMQ) Put(data string, level uint32, delay time.Duration) interface{} {
-	err := this.channel.Publish(this.exchange, this.tube, false, false, amqp.Publishing{
+	if this.channel == nil {
+		return false
+	}
+
+	err := this.channel.Publish(this.exchange, this.tube, false, false, amqp.Publishing {
 		ContentType: "text/plain",
 		MessageId: this.UUID(),
 		Body: []byte(data),
@@ -193,35 +230,23 @@ func (this *rabbitMQ) UUID() string {
 	return hex.EncodeToString(instance.Sum(nil))
 }
 
-func (this *rabbitMQ) Watch(tube string) {
-	queue, err := this.channel.QueueDeclare(this.exchange + "." + this.tube, true, false, false, false, nil)
-	if err != nil {
-		this.log("mq.rabbitMQ.Watch.QueueDeclare error:" + err.Error())
+func (this *rabbitMQ) Reserve(fun ReserveMessageFunc) {
+	if this.channel == nil {
 		return
 	}
 
-	err = this.channel.QueueBind(queue.Name, this.tube, this.exchange, true, nil)
-	if err != nil {
-		this.log("mq.rabbitMQ.Watch.QueueBind error:" + err.Error())
-		return
-	}
-}
-
-func (this *rabbitMQ) Reserve(timeout time.Duration) *Message {
-	delivery, _ , err:= this.channel.Get(this.exchange + "." + this.tube, false)
+	deliveries, err := this.channel.Consume(this.queue.Name, "", false, false, false, true, nil)
 	if err != nil {
 		this.log("mq.rabbitMQ.Reserve error:" + err.Error())
-		return nil
+		return
 	}
 
-	if delivery.Acknowledger == nil {
-		return nil
-	}
-
-	return &Message{
-		delivery: delivery,
-		Id: delivery.MessageId,
-		Body: string(delivery.Body),
+	for delivery := range deliveries {
+		fun(this, &Message{
+			delivery: delivery,
+			Id: delivery.MessageId,
+			Body: string(delivery.Body),
+		})
 	}
 }
 
@@ -249,10 +274,16 @@ func (this *beanstalkd) Connect() {
 }
 
 func (this *beanstalkd) Close() {
-	this.handle.Close()
+	if this.handle != nil {
+		this.handle.Close()
+	}
 }
 
 func (this *beanstalkd) UseTube(tube string) {
+	if this.handle == nil {
+		return
+	}
+
 	this.handle.Tube.Name = tube
 	this.handle.TubeSet.Name[tube] = true
 }
@@ -261,7 +292,15 @@ func (this *beanstalkd) FanoutTube(tube string) {
 	this.UseTube(tube)
 }
 
+func (this *beanstalkd) Watch(tube string) {
+
+}
+
 func (this *beanstalkd) Put(data string, level uint32, delay time.Duration) interface{} {
+	if this.handle == nil {
+		return 0
+	}
+
 	id, err := this.handle.Put([]byte(data), level, delay, 60 * time.Second)
 	if err != nil {
 		this.log("mq.beanstalkd.Put error:" + err.Error())
@@ -271,25 +310,29 @@ func (this *beanstalkd) Put(data string, level uint32, delay time.Duration) inte
 	return id
 }
 
-func (this *beanstalkd) Watch(tube string) {
+func (this *beanstalkd) Reserve(fun ReserveMessageFunc) {
+	if this.handle == nil {
+		return
+	}
 
-}
-
-func (this *beanstalkd) Reserve(timeout time.Duration) *Message {
 	message := Message{}
-	id, body, err := this.handle.Reserve(timeout)
+	id, body, err := this.handle.Reserve(1 * time.Second)
 	if err != nil {
 		this.log("mq.beanstalkd.Reserve error:" + err.Error())
-		return nil
+		return
 	}
 
 	message.Id = strconv.FormatUint(id, 10)
 	message.Body = string(body)
 
-	return &message
+	fun(this, &message)
 }
 
 func (this *beanstalkd) Delete(message *Message) bool {
+	if this.handle == nil {
+		return false
+	}
+
 	id, err := strconv.ParseUint(message.Id, 10, 64)
 	if err != nil {
 		this.log("mq.beanstalkd.Delete error:" + err.Error())

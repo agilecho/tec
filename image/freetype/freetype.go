@@ -1,10 +1,10 @@
 package freetype
 
 import (
-	"tec/image/fixed"
-	"tec/image/font"
-	"tec/image/freetype/raster"
-	"tec/image/freetype/truetype"
+	"github.com/agilecho/tec/image/fixed"
+	"github.com/agilecho/tec/image/font"
+	"github.com/agilecho/tec/image/freetype/raster"
+	"github.com/agilecho/tec/image/freetype/truetype"
 	"errors"
 	"image"
 	"image/draw"

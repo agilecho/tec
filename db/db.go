@@ -1,10 +1,10 @@
 package db
 
 import (
-	"tec/db/mysql"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"github.com/agilecho/tec/db/mysql"
 	"math/rand"
 	"os"
 	"reflect"
@@ -310,6 +310,10 @@ func buildLink(config *Config) *linkWrapper {
 }
 
 func buildLinkOfMaster() *linkWrapper {
+	if linkMaster == nil {
+		return nil
+	}
+
 	linkMaster.lifetime = time.Now().Unix()
 	return linkMaster
 }
@@ -504,14 +508,17 @@ func query(tsql string, args ...interface{}) (*sql.Rows, error) {
 		logger("db.query tsql:" + tsql + " arg:" + string(result))
 	}
 
-	db := buildLinkOfSlave()
+	link := buildLinkOfSlave()
+	if link == nil {
+		return nil, nil
+	}
 
 	if len(args) == 0 {
-		return db.handler.Query(tsql)
+		return link.handler.Query(tsql)
 	} else {
 		var stmt *sql.Stmt
 
-		stmt, err := db.handler.Prepare(tsql)
+		stmt, err := link.handler.Prepare(tsql)
 		if err != nil {
 			return nil, err
 		}
@@ -669,6 +676,10 @@ func Execute(tsql string, args ...interface{}) sql.Result {
 	var err error
 
 	link := buildLinkOfMaster()
+	if link == nil {
+		return nil
+	}
+
 	if len(args) == 0 {
 		result, err = link.handler.Exec(tsql)
 	} else {

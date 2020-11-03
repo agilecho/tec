@@ -1,8 +1,8 @@
 package cache
 
 import (
-	"tec/cache/redis"
 	"fmt"
+	"github.com/agilecho/tec/cache/redis"
 	"os"
 	"strconv"
 	"strings"
@@ -105,7 +105,7 @@ func Init(config *Config) {
 		IdleTimeout: 30 * time.Second,
 		MaxConnLifetime: time.Duration(config.Timeout) * time.Second,
 		Dial: func() (redis.Conn, error) {
-			return redis.Dial(config.Host, config.Port, config.Passwd)
+			return redis.Dial("tcp", fmt.Sprintf("%v:%v", config.Host, config.Port), redis.DialPassword(config.Passwd))
 		},
 		Wait:true,
 	}
@@ -119,10 +119,14 @@ func Close() {
 	}
 }
 
-func Do(command string, args ...interface{}) interface{} {
+func Do(command string, args ...interface{}) (interface{}, error) {
+	if pool == nil {
+		return nil, nil
+	}
+
 	conn := pool.Get()
 	if conn == nil {
-		return nil
+		return nil, nil
 	}
 
 	defer conn.Close()
@@ -132,10 +136,10 @@ func Do(command string, args ...interface{}) interface{} {
 	result, err := conn.Do(command, args...)
 	if err != nil {
 		logger("cache.Do error:" + err.Error())
-		return nil
+		return nil, err
 	}
 
-	return result
+	return result, nil
 }
 
 func Has(key string) int {

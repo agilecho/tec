@@ -1,8 +1,8 @@
 package truetype
 
 import (
-	"tec/image/fixed"
-	"tec/image/font"
+	"github.com/agilecho/tec/image/fixed"
+	"github.com/agilecho/tec/image/font"
 )
 
 type Point struct {

@@ -1,11 +1,11 @@
 package tec
 
 import (
-	"tec/cache"
-	"tec/db"
-	"tec/mongo"
-	"tec/mq"
-	"tec/ws"
+	"github.com/agilecho/tec/cache"
+	"github.com/agilecho/tec/db"
+	"github.com/agilecho/tec/mongo"
+	"github.com/agilecho/tec/mq"
+	"github.com/agilecho/tec/ws"
 	"strconv"
 	"strings"
 )

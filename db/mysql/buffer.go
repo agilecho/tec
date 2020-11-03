@@ -21,7 +21,6 @@ type buffer struct {
 
 func newBuffer(nc net.Conn) buffer {
 	fg := make([]byte, defaultBufSize)
-
 	return buffer{
 		buf:  fg,
 		nc:   nc,
@@ -38,8 +37,7 @@ func (b *buffer) fill(need int) error {
 	dest := b.dbuf[b.flipcnt&1]
 
 	if need > len(dest) {
-		dest = make([]byte, ((need/defaultBufSize) + 1) * defaultBufSize)
-
+		dest = make([]byte, ((need/defaultBufSize)+1)*defaultBufSize)
 		if len(dest) <= maxCachedBufSize {
 			b.dbuf[b.flipcnt&1] = dest
 		}

@@ -1,12 +1,12 @@
 package tec
 
 import (
-	"tec/cache"
-	"tec/db"
-	"tec/mongo"
-	"tec/ws"
 	"context"
 	"fmt"
+	"github.com/agilecho/tec/cache"
+	"github.com/agilecho/tec/db"
+	"github.com/agilecho/tec/mongo"
+	"github.com/agilecho/tec/ws"
 	"net/http"
 	"os"
 	"os/signal"
@@ -385,7 +385,7 @@ func Cli(callback func()) {
 
 	CONFIG = config
 
-	Logger("ROOT_PATH:" + ROOT_PATH + "HOST_NAME:" + HOST_NAME, "tec", "false")
+	Logger("ROOT_PATH:" + ROOT_PATH + " HOST_NAME:" + HOST_NAME, "tec", "false")
 	Logger("cli run", "tec", "false")
 
 	callback()

@@ -13,7 +13,6 @@ func (mf *mysqlField) typeDatabaseName() string {
 		if mf.charSet != collations[binaryCollation] {
 			return "TEXT"
 		}
-
 		return "BLOB"
 	case fieldTypeDate:
 		return "DATE"
@@ -99,7 +98,7 @@ var (
 	scanTypeInt64     = reflect.TypeOf(int64(0))
 	scanTypeNullFloat = reflect.TypeOf(sql.NullFloat64{})
 	scanTypeNullInt   = reflect.TypeOf(sql.NullInt64{})
-	scanTypeNullTime  = reflect.TypeOf(NullTime{})
+	scanTypeNullTime  = reflect.TypeOf(nullTime{})
 	scanTypeUint8     = reflect.TypeOf(uint8(0))
 	scanTypeUint16    = reflect.TypeOf(uint16(0))
 	scanTypeUint32    = reflect.TypeOf(uint32(0))
@@ -125,10 +124,8 @@ func (mf *mysqlField) scanType() reflect.Type {
 			if mf.flags&flagUnsigned != 0 {
 				return scanTypeUint8
 			}
-
 			return scanTypeInt8
 		}
-
 		return scanTypeNullInt
 
 	case fieldTypeShort, fieldTypeYear:
@@ -136,10 +133,8 @@ func (mf *mysqlField) scanType() reflect.Type {
 			if mf.flags&flagUnsigned != 0 {
 				return scanTypeUint16
 			}
-
 			return scanTypeInt16
 		}
-
 		return scanTypeNullInt
 
 	case fieldTypeInt24, fieldTypeLong:
@@ -147,10 +142,8 @@ func (mf *mysqlField) scanType() reflect.Type {
 			if mf.flags&flagUnsigned != 0 {
 				return scanTypeUint32
 			}
-
 			return scanTypeInt32
 		}
-
 		return scanTypeNullInt
 
 	case fieldTypeLongLong:
@@ -158,24 +151,20 @@ func (mf *mysqlField) scanType() reflect.Type {
 			if mf.flags&flagUnsigned != 0 {
 				return scanTypeUint64
 			}
-
 			return scanTypeInt64
 		}
-
 		return scanTypeNullInt
 
 	case fieldTypeFloat:
-		if mf.flags & flagNotNULL != 0 {
+		if mf.flags&flagNotNULL != 0 {
 			return scanTypeFloat32
 		}
-
 		return scanTypeNullFloat
 
 	case fieldTypeDouble:
-		if mf.flags & flagNotNULL != 0 {
+		if mf.flags&flagNotNULL != 0 {
 			return scanTypeFloat64
 		}
-
 		return scanTypeNullFloat
 
 	case fieldTypeDecimal, fieldTypeNewDecimal, fieldTypeVarChar,

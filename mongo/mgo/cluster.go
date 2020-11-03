@@ -3,11 +3,11 @@ package mgo
 import (
 	"errors"
 	"fmt"
+	"github.com/agilecho/tec/mongo/mgo/bson"
 	"net"
 	"strconv"
 	"strings"
 	"sync"
-	"tec/mongo/mgo/bson"
 	"time"
 )
 

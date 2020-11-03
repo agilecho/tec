@@ -1,8 +1,8 @@
 package mongo
 
 import (
-	"tec/mongo/mgo"
 	"fmt"
+	"github.com/agilecho/tec/mongo/mgo"
 	"os"
 	"strconv"
 	"strings"
@@ -58,8 +58,8 @@ func (this *Collection) Count(where Condition) int {
 	return count
 }
 
-func (this *Collection) Find(where Condition, sort string, skip int, limit int) []*Document {
-	rows := []*Document{}
+func (this *Collection) Find(where Condition, sort string, skip int, limit int) []Document {
+	rows := []Document{}
 
 	if limit <= 0 {
 		var err error
@@ -90,7 +90,7 @@ func (this *Collection) Find(where Condition, sort string, skip int, limit int) 
 	return rows
 }
 
-func (this *Collection) FindOne(where Condition) *Document {
+func (this *Collection) FindOne(where Condition) Document {
 	documents := this.Find(where, "", 0, 1)
 
 	if len(documents) == 0 {

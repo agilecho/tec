@@ -6,9 +6,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/agilecho/tec/mongo/mgo/bson"
+	"github.com/agilecho/tec/mongo/mgo/internal/scram"
 	"sync"
-	"tec/mongo/mgo/bson"
-	"tec/mongo/mgo/internal/scram"
 )
 
 type authCmd struct {

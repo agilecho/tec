@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/agilecho/tec/mongo/mgo/bson"
 	"math"
 	"net"
 	"net/url"
@@ -13,7 +14,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"tec/mongo/mgo/bson"
 	"time"
 )
 

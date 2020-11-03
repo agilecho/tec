@@ -2,7 +2,7 @@ package truetype
 
 import (
 	"fmt"
-	"tec/image/fixed"
+	"github.com/agilecho/tec/image/fixed"
 )
 
 type Index uint16

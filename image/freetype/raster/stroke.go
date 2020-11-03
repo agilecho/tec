@@ -1,6 +1,6 @@
 package raster
 
-import "tec/image/fixed"
+import "github.com/agilecho/tec/image/fixed"
 
 const epsilon = fixed.Int52_12(1024)
 

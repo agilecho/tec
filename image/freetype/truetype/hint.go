@@ -3,7 +3,7 @@ package truetype
 import (
 	"errors"
 	"math"
-	"tec/image/fixed"
+	"github.com/agilecho/tec/image/fixed"
 )
 
 const (

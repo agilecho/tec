@@ -12,20 +12,17 @@ type connector struct {
 
 func (c *connector) Connect(ctx context.Context) (driver.Conn, error) {
 	var err error
-
 	mc := &mysqlConn{
 		maxAllowedPacket: maxPacketSize,
-		maxWriteSize: maxPacketSize - 1,
-		closech: make(chan struct{}),
-		cfg: c.cfg,
+		maxWriteSize:     maxPacketSize - 1,
+		closech:          make(chan struct{}),
+		cfg:              c.cfg,
 	}
-
 	mc.parseTime = mc.cfg.ParseTime
 
 	dialsLock.RLock()
 	dial, ok := dials[mc.cfg.Net]
 	dialsLock.RUnlock()
-
 	if ok {
 		dctx := ctx
 		if mc.cfg.Timeout > 0 {
@@ -33,7 +30,6 @@ func (c *connector) Connect(ctx context.Context) (driver.Conn, error) {
 			dctx, cancel = context.WithTimeout(ctx, c.cfg.Timeout)
 			defer cancel()
 		}
-
 		mc.netConn, err = dial(dctx, mc.cfg.Addr)
 	} else {
 		nd := net.Dialer{Timeout: mc.cfg.Timeout}
@@ -41,10 +37,6 @@ func (c *connector) Connect(ctx context.Context) (driver.Conn, error) {
 	}
 
 	if err != nil {
-		if nerr, ok := err.(net.Error); ok && nerr.Temporary() {
-			errLog.Print("net.Error from Dial()': ", nerr.Error())
-			return nil, driver.ErrBadConn
-		}
 		return nil, err
 	}
 
@@ -57,15 +49,13 @@ func (c *connector) Connect(ctx context.Context) (driver.Conn, error) {
 	}
 
 	mc.startWatcher()
-
 	if err := mc.watchCancel(ctx); err != nil {
+		mc.cleanup()
 		return nil, err
 	}
-
 	defer mc.finish()
 
 	mc.buf = newBuffer(mc.netConn)
-
 	mc.buf.timeout = mc.cfg.ReadTimeout
 	mc.writeTimeout = mc.cfg.WriteTimeout
 
@@ -89,7 +79,6 @@ func (c *connector) Connect(ctx context.Context) (driver.Conn, error) {
 			return nil, err
 		}
 	}
-
 	if err = mc.writeHandshakeResponsePacket(authResp, plugin); err != nil {
 		mc.cleanup()
 		return nil, err
@@ -108,10 +97,8 @@ func (c *connector) Connect(ctx context.Context) (driver.Conn, error) {
 			mc.Close()
 			return nil, err
 		}
-
 		mc.maxAllowedPacket = stringToInt(maxap) - 1
 	}
-
 	if mc.maxAllowedPacket < maxPacketSize {
 		mc.maxWriteSize = mc.maxAllowedPacket
 	}

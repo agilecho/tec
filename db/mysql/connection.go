@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"encoding/json"
 	"io"
 	"net"
 	"strconv"
@@ -12,30 +13,31 @@ import (
 )
 
 type mysqlConn struct {
-	buf buffer
-	netConn net.Conn
-	rawConn net.Conn
-	affectedRows uint64
-	insertId uint64
-	cfg *Config
+	buf              buffer
+	netConn          net.Conn
+	rawConn          net.Conn
+	affectedRows     uint64
+	insertId         uint64
+	cfg              *Config
 	maxAllowedPacket int
-	maxWriteSize int
-	writeTimeout time.Duration
-	flags clientFlag
-	status statusFlag
-	sequence uint8
-	parseTime bool
-	reset bool
+	maxWriteSize     int
+	writeTimeout     time.Duration
+	flags            clientFlag
+	status           statusFlag
+	sequence         uint8
+	parseTime        bool
+	reset            bool
 
 	watching bool
-	watcher  chan <- context.Context
+	watcher  chan<- context.Context
 	closech  chan struct{}
-	finished chan <- struct{}
+	finished chan<- struct{}
 	canceled atomicError
-	closed atomicBool
+	closed   atomicBool
 }
 
 func (mc *mysqlConn) handleParams() (err error) {
+	var cmdSet strings.Builder
 	for param, val := range mc.cfg.Params {
 		switch param {
 		case "charset":
@@ -46,15 +48,26 @@ func (mc *mysqlConn) handleParams() (err error) {
 					break
 				}
 			}
-
 			if err != nil {
 				return
 			}
 		default:
-			err = mc.exec("SET " + param + "=" + val + "")
-			if err != nil {
-				return
+			if cmdSet.Len() == 0 {
+				cmdSet.Grow(4 + len(param) + 1 + len(val) + 30*(len(mc.cfg.Params)-1))
+				cmdSet.WriteString("SET ")
+			} else {
+				cmdSet.WriteByte(',')
 			}
+			cmdSet.WriteString(param)
+			cmdSet.WriteByte('=')
+			cmdSet.WriteString(val)
+		}
+	}
+
+	if cmdSet.Len() > 0 {
+		err = mc.exec(cmdSet.String())
+		if err != nil {
+			return
 		}
 	}
 
@@ -65,11 +78,9 @@ func (mc *mysqlConn) markBadConn(err error) error {
 	if mc == nil {
 		return err
 	}
-
 	if err != errBadConnNoWrite {
 		return err
 	}
-
 	return driver.ErrBadConn
 }
 
@@ -82,19 +93,16 @@ func (mc *mysqlConn) begin(readOnly bool) (driver.Tx, error) {
 		errLog.Print(ErrInvalidConn)
 		return nil, driver.ErrBadConn
 	}
-
 	var q string
 	if readOnly {
 		q = "START TRANSACTION READ ONLY"
 	} else {
 		q = "START TRANSACTION"
 	}
-
 	err := mc.exec(q)
 	if err == nil {
 		return &mysqlTx{mc}, err
 	}
-
 	return nil, mc.markBadConn(err)
 }
 
@@ -114,11 +122,9 @@ func (mc *mysqlConn) cleanup() {
 	}
 
 	close(mc.closech)
-
 	if mc.netConn == nil {
 		return
 	}
-
 	if err := mc.netConn.Close(); err != nil {
 		errLog.Print(err)
 	}
@@ -129,10 +135,8 @@ func (mc *mysqlConn) error() error {
 		if err := mc.canceled.Value(); err != nil {
 			return err
 		}
-
 		return ErrInvalidConn
 	}
-
 	return nil
 }
 
@@ -178,7 +182,6 @@ func (mc *mysqlConn) interpolateParams(query string, args []driver.Value) (strin
 		errLog.Print(err)
 		return "", ErrInvalidConn
 	}
-
 	buf = buf[:0]
 	argPos := 0
 
@@ -188,7 +191,6 @@ func (mc *mysqlConn) interpolateParams(query string, args []driver.Value) (strin
 			buf = append(buf, query[i:]...)
 			break
 		}
-
 		buf = append(buf, query[i:i+q]...)
 		i += q
 
@@ -217,48 +219,21 @@ func (mc *mysqlConn) interpolateParams(query string, args []driver.Value) (strin
 			if v.IsZero() {
 				buf = append(buf, "'0000-00-00'"...)
 			} else {
-				v := v.In(mc.cfg.Loc)
-				v = v.Add(time.Nanosecond * 500)
-				year := v.Year()
-				year100 := year / 100
-				year1 := year % 100
-				month := v.Month()
-				day := v.Day()
-				hour := v.Hour()
-				minute := v.Minute()
-				second := v.Second()
-				micro := v.Nanosecond() / 1000
-
-				buf = append(buf, []byte{
-					'\'',
-					digits10[year100], digits01[year100],
-					digits10[year1], digits01[year1],
-					'-',
-					digits10[month], digits01[month],
-					'-',
-					digits10[day], digits01[day],
-					' ',
-					digits10[hour], digits01[hour],
-					':',
-					digits10[minute], digits01[minute],
-					':',
-					digits10[second], digits01[second],
-				}...)
-
-				if micro != 0 {
-					micro10000 := micro / 10000
-					micro100 := micro / 100 % 100
-					micro1 := micro % 100
-					buf = append(buf, []byte{
-						'.',
-						digits10[micro10000], digits01[micro10000],
-						digits10[micro100], digits01[micro100],
-						digits10[micro1], digits01[micro1],
-					}...)
+				buf = append(buf, '\'')
+				buf, err = appendDateTime(buf, v.In(mc.cfg.Loc))
+				if err != nil {
+					return "", err
 				}
-
 				buf = append(buf, '\'')
 			}
+		case json.RawMessage:
+			buf = append(buf, '\'')
+			if mc.status&statusNoBackslashEscapes == 0 {
+				buf = escapeBytesBackslash(buf, v)
+			} else {
+				buf = escapeBytesQuotes(buf, v)
+			}
+			buf = append(buf, '\'')
 		case []byte:
 			if v == nil {
 				buf = append(buf, "NULL"...)
@@ -269,7 +244,6 @@ func (mc *mysqlConn) interpolateParams(query string, args []driver.Value) (strin
 				} else {
 					buf = escapeBytesQuotes(buf, v)
 				}
-
 				buf = append(buf, '\'')
 			}
 		case string:
@@ -279,7 +253,6 @@ func (mc *mysqlConn) interpolateParams(query string, args []driver.Value) (strin
 			} else {
 				buf = escapeStringQuotes(buf, v)
 			}
-
 			buf = append(buf, '\'')
 		default:
 			return "", driver.ErrSkip
@@ -289,11 +262,9 @@ func (mc *mysqlConn) interpolateParams(query string, args []driver.Value) (strin
 			return "", driver.ErrSkip
 		}
 	}
-
 	if argPos != len(args) {
 		return "", driver.ErrSkip
 	}
-
 	return string(buf), nil
 }
 
@@ -302,20 +273,16 @@ func (mc *mysqlConn) Exec(query string, args []driver.Value) (driver.Result, err
 		errLog.Print(ErrInvalidConn)
 		return nil, driver.ErrBadConn
 	}
-
 	if len(args) != 0 {
 		if !mc.cfg.InterpolateParams {
 			return nil, driver.ErrSkip
 		}
-
 		prepared, err := mc.interpolateParams(query, args)
 		if err != nil {
 			return nil, err
 		}
-
 		query = prepared
 	}
-
 	mc.affectedRows = 0
 	mc.insertId = 0
 
@@ -326,7 +293,6 @@ func (mc *mysqlConn) Exec(query string, args []driver.Value) (driver.Result, err
 			insertId:     int64(mc.insertId),
 		}, err
 	}
-
 	return nil, mc.markBadConn(err)
 }
 
@@ -362,25 +328,20 @@ func (mc *mysqlConn) query(query string, args []driver.Value) (*textRows, error)
 		errLog.Print(ErrInvalidConn)
 		return nil, driver.ErrBadConn
 	}
-
 	if len(args) != 0 {
 		if !mc.cfg.InterpolateParams {
 			return nil, driver.ErrSkip
 		}
-
 		prepared, err := mc.interpolateParams(query, args)
 		if err != nil {
 			return nil, err
 		}
-
 		query = prepared
 	}
-
 	err := mc.writeCommandPacketStr(comQuery, query)
 	if err == nil {
 		var resLen int
 		resLen, err = mc.readResultSetHeaderPacket()
-
 		if err == nil {
 			rows := new(textRows)
 			rows.mc = mc
@@ -400,7 +361,6 @@ func (mc *mysqlConn) query(query string, args []driver.Value) (*textRows, error)
 			return rows, err
 		}
 	}
-
 	return nil, mc.markBadConn(err)
 }
 
@@ -426,7 +386,6 @@ func (mc *mysqlConn) getSystemVar(name string) ([]byte, error) {
 			return dest[0].([]byte), mc.readUntilEOF()
 		}
 	}
-
 	return nil, err
 }
 
@@ -439,7 +398,6 @@ func (mc *mysqlConn) finish() {
 	if !mc.watching || mc.finished == nil {
 		return
 	}
-
 	select {
 	case mc.finished <- struct{}{}:
 		mc.watching = false
@@ -456,7 +414,6 @@ func (mc *mysqlConn) Ping(ctx context.Context) (err error) {
 	if err = mc.watchCancel(ctx); err != nil {
 		return
 	}
-
 	defer mc.finish()
 
 	if err = mc.writeCommandPacket(comPing); err != nil {
@@ -467,10 +424,13 @@ func (mc *mysqlConn) Ping(ctx context.Context) (err error) {
 }
 
 func (mc *mysqlConn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, error) {
+	if mc.closed.IsSet() {
+		return nil, driver.ErrBadConn
+	}
+
 	if err := mc.watchCancel(ctx); err != nil {
 		return nil, err
 	}
-
 	defer mc.finish()
 
 	if sql.IsolationLevel(opts.Isolation) != sql.LevelDefault {
@@ -478,7 +438,6 @@ func (mc *mysqlConn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver
 		if err != nil {
 			return nil, err
 		}
-
 		err = mc.exec("SET TRANSACTION ISOLATION LEVEL " + level)
 		if err != nil {
 			return nil, err
@@ -503,7 +462,6 @@ func (mc *mysqlConn) QueryContext(ctx context.Context, query string, args []driv
 		mc.finish()
 		return nil, err
 	}
-
 	rows.finish = mc.finish
 	return rows, err
 }
@@ -557,7 +515,6 @@ func (stmt *mysqlStmt) QueryContext(ctx context.Context, args []driver.NamedValu
 		stmt.mc.finish()
 		return nil, err
 	}
-
 	rows.finish = stmt.mc.finish
 	return rows, err
 }
@@ -571,7 +528,6 @@ func (stmt *mysqlStmt) ExecContext(ctx context.Context, args []driver.NamedValue
 	if err := stmt.mc.watchCancel(ctx); err != nil {
 		return nil, err
 	}
-
 	defer stmt.mc.finish()
 
 	return stmt.Exec(dargs)
@@ -582,15 +538,12 @@ func (mc *mysqlConn) watchCancel(ctx context.Context) error {
 		mc.cleanup()
 		return nil
 	}
-
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-
 	if ctx.Done() == nil {
 		return nil
 	}
-
 	if mc.watcher == nil {
 		return nil
 	}

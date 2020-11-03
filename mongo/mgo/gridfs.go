@@ -4,11 +4,11 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"errors"
+	"github.com/agilecho/tec/mongo/mgo/bson"
 	"hash"
 	"io"
 	"os"
 	"sync"
-	"tec/mongo/mgo/bson"
 	"time"
 )
 

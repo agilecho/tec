@@ -3,6 +3,8 @@ package redis
 import (
 	"bufio"
 	"bytes"
+	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -13,184 +15,402 @@ import (
 )
 
 var (
-	okReply   interface{} = "OK"
-	pongReply interface{} = "PONG"
+	_ ConnWithTimeout = (*conn)(nil)
 )
 
-type connection struct {
-	mu sync.Mutex
+type conn struct {
+	mu      sync.Mutex
 	pending int
-	err error
-	conn net.Conn
+	err     error
+	conn    net.Conn
+
 	readTimeout time.Duration
-	br *bufio.Reader
+	br          *bufio.Reader
 	writeTimeout time.Duration
-	bw *bufio.Writer
+	bw           *bufio.Writer
 	lenScratch [32]byte
 	numScratch [40]byte
 }
 
+type DialOption struct {
+	f func(*dialOptions)
+}
 
-func (this *connection) Close() error {
-	this.mu.Lock()
-	err := this.err
+type dialOptions struct {
+	readTimeout  time.Duration
+	writeTimeout time.Duration
+	dialer       *net.Dialer
+	dialContext  func(ctx context.Context, network, addr string) (net.Conn, error)
+	db           int
+	username     string
+	password     string
+	clientName   string
+	useTLS       bool
+	skipVerify   bool
+	tlsConfig    *tls.Config
+}
 
-	if this.err == nil {
-		this.err = errors.New("redis closed")
-		err = this.conn.Close()
+func DialReadTimeout(d time.Duration) DialOption {
+	return DialOption{func(do *dialOptions) {
+		do.readTimeout = d
+	}}
+}
+
+func DialWriteTimeout(d time.Duration) DialOption {
+	return DialOption{func(do *dialOptions) {
+		do.writeTimeout = d
+	}}
+}
+
+func DialConnectTimeout(d time.Duration) DialOption {
+	return DialOption{func(do *dialOptions) {
+		do.dialer.Timeout = d
+	}}
+}
+
+func DialKeepAlive(d time.Duration) DialOption {
+	return DialOption{func(do *dialOptions) {
+		do.dialer.KeepAlive = d
+	}}
+}
+
+func DialNetDial(dial func(network, addr string) (net.Conn, error)) DialOption {
+	return DialOption{func(do *dialOptions) {
+		do.dialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return dial(network, addr)
+		}
+	}}
+}
+
+func DialContextFunc(f func(ctx context.Context, network, addr string) (net.Conn, error)) DialOption {
+	return DialOption{func(do *dialOptions) {
+		do.dialContext = f
+	}}
+}
+
+func DialDatabase(db int) DialOption {
+	return DialOption{func(do *dialOptions) {
+		do.db = db
+	}}
+}
+
+func DialPassword(password string) DialOption {
+	return DialOption{func(do *dialOptions) {
+		do.password = password
+	}}
+}
+
+func DialUsername(username string) DialOption {
+	return DialOption{func(do *dialOptions) {
+		do.username = username
+	}}
+}
+
+func DialClientName(name string) DialOption {
+	return DialOption{func(do *dialOptions) {
+		do.clientName = name
+	}}
+}
+
+func DialTLSConfig(c *tls.Config) DialOption {
+	return DialOption{func(do *dialOptions) {
+		do.tlsConfig = c
+	}}
+}
+
+func DialTLSSkipVerify(skip bool) DialOption {
+	return DialOption{func(do *dialOptions) {
+		do.skipVerify = skip
+	}}
+}
+
+func DialUseTLS(useTLS bool) DialOption {
+	return DialOption{func(do *dialOptions) {
+		do.useTLS = useTLS
+	}}
+}
+
+func Dial(network, address string, options ...DialOption) (Conn, error) {
+	return DialContext(context.Background(), network, address, options...)
+}
+
+func DialContext(ctx context.Context, network, address string, options ...DialOption) (Conn, error) {
+	fmt.Println(network, address, options)
+	do := dialOptions{
+		dialer: &net.Dialer{
+			KeepAlive: time.Minute * 5,
+		},
+	}
+	for _, option := range options {
+		option.f(&do)
+	}
+	if do.dialContext == nil {
+		do.dialContext = do.dialer.DialContext
 	}
 
-	this.mu.Unlock()
-	return err
-}
-
-func (this *connection) fatal(err error) error {
-	this.mu.Lock()
-
-	if this.err == nil {
-		this.err = err
-		this.conn.Close()
+	netConn, err := do.dialContext(ctx, network, address)
+	if err != nil {
+		return nil, err
 	}
 
-	this.mu.Unlock()
+	if do.useTLS {
+		var tlsConfig *tls.Config
+		if do.tlsConfig == nil {
+			tlsConfig = &tls.Config{InsecureSkipVerify: do.skipVerify}
+		} else {
+			tlsConfig = cloneTLSConfig(do.tlsConfig)
+		}
+		if tlsConfig.ServerName == "" {
+			host, _, err := net.SplitHostPort(address)
+			if err != nil {
+				netConn.Close()
+				return nil, err
+			}
+			tlsConfig.ServerName = host
+		}
+
+		tlsConn := tls.Client(netConn, tlsConfig)
+		if err := tlsConn.Handshake(); err != nil {
+			netConn.Close()
+			return nil, err
+		}
+		netConn = tlsConn
+	}
+
+	c := &conn{
+		conn:         netConn,
+		bw:           bufio.NewWriter(netConn),
+		br:           bufio.NewReader(netConn),
+		readTimeout:  do.readTimeout,
+		writeTimeout: do.writeTimeout,
+	}
+
+	if do.password != "" {
+		authArgs := make([]interface{}, 0, 2)
+		if do.username != "" {
+			authArgs = append(authArgs, do.username)
+		}
+		authArgs = append(authArgs, do.password)
+		if _, err := c.Do("AUTH", authArgs...); err != nil {
+			netConn.Close()
+			return nil, err
+		}
+	}
+
+	if do.clientName != "" {
+		if _, err := c.Do("CLIENT", "SETNAME", do.clientName); err != nil {
+			netConn.Close()
+			return nil, err
+		}
+	}
+
+	if do.db != 0 {
+		if _, err := c.Do("SELECT", do.db); err != nil {
+			netConn.Close()
+			return nil, err
+		}
+	}
+
+	return c, nil
+}
+
+func (c *conn) Close() error {
+	c.mu.Lock()
+	err := c.err
+	if c.err == nil {
+		c.err = errors.New("redigo: closed")
+		err = c.conn.Close()
+	}
+	c.mu.Unlock()
 	return err
 }
 
-func (this *connection) Err() error {
-	this.mu.Lock()
-	err := this.err
-	this.mu.Unlock()
+func (c *conn) fatal(err error) error {
+	c.mu.Lock()
+	if c.err == nil {
+		c.err = err
+		c.conn.Close()
+	}
+	c.mu.Unlock()
 	return err
 }
 
-func (this *connection) writeLen(prefix byte, n int) error {
-	this.lenScratch[len(this.lenScratch)-1] = '\n'
-	this.lenScratch[len(this.lenScratch)-2] = '\r'
-	i := len(this.lenScratch) - 3
+func (c *conn) Err() error {
+	c.mu.Lock()
+	err := c.err
+	c.mu.Unlock()
+	return err
+}
 
+func (c *conn) writeLen(prefix byte, n int) error {
+	c.lenScratch[len(c.lenScratch)-1] = '\n'
+	c.lenScratch[len(c.lenScratch)-2] = '\r'
+	i := len(c.lenScratch) - 3
 	for {
-		this.lenScratch[i] = byte('0' + n%10)
+		c.lenScratch[i] = byte('0' + n%10)
 		i -= 1
 		n = n / 10
 		if n == 0 {
 			break
 		}
 	}
-
-	this.lenScratch[i] = prefix
-
-	_, err := this.bw.Write(this.lenScratch[i:])
+	c.lenScratch[i] = prefix
+	_, err := c.bw.Write(c.lenScratch[i:])
 	return err
 }
 
-func (this *connection) writeString(s string) error {
-	this.writeLen('$', len(s))
-	this.bw.WriteString(s)
-
-	_, err := this.bw.WriteString("\r\n")
+func (c *conn) writeString(s string) error {
+	c.writeLen('$', len(s))
+	c.bw.WriteString(s)
+	_, err := c.bw.WriteString("\r\n")
 	return err
 }
 
-func (this *connection) writeBytes(p []byte) error {
-	this.writeLen('$', len(p))
-	this.bw.Write(p)
-
-	_, err := this.bw.WriteString("\r\n")
+func (c *conn) writeBytes(p []byte) error {
+	c.writeLen('$', len(p))
+	c.bw.Write(p)
+	_, err := c.bw.WriteString("\r\n")
 	return err
 }
 
-func (this *connection) writeInt64(n int64) error {
-	return this.writeBytes(strconv.AppendInt(this.numScratch[:0], n, 10))
+func (c *conn) writeInt64(n int64) error {
+	return c.writeBytes(strconv.AppendInt(c.numScratch[:0], n, 10))
 }
 
-func (this *connection) writeFloat64(n float64) error {
-	return this.writeBytes(strconv.AppendFloat(this.numScratch[:0], n, 'g', -1, 64))
+func (c *conn) writeFloat64(n float64) error {
+	return c.writeBytes(strconv.AppendFloat(c.numScratch[:0], n, 'g', -1, 64))
 }
 
-func (this *connection) writeCommand(cmd string, args []interface{}) error {
-	this.writeLen('*', 1 + len(args))
-
-	if err := this.writeString(cmd); err != nil {
+func (c *conn) writeCommand(cmd string, args []interface{}) error {
+	c.writeLen('*', 1+len(args))
+	if err := c.writeString(cmd); err != nil {
 		return err
 	}
-
-	for i, arg := range args {
-		if err := this.writeArg(i, arg, true); err != nil {
+	for _, arg := range args {
+		if err := c.writeArg(arg, true); err != nil {
 			return err
 		}
 	}
-
 	return nil
 }
 
-func (this *connection) writeArg(index int, arg interface{}, argumentTypeOK bool) (err error) {
+func (c *conn) writeArg(arg interface{}, argumentTypeOK bool) (err error) {
 	switch arg := arg.(type) {
 	case string:
-		if index == 0 {
-			return this.writeString(arg)
-		}
-
-		return this.writeString(arg)
+		return c.writeString(arg)
 	case []byte:
-		return this.writeBytes(arg)
+		return c.writeBytes(arg)
 	case int:
-		return this.writeInt64(int64(arg))
+		return c.writeInt64(int64(arg))
 	case int64:
-		return this.writeInt64(arg)
+		return c.writeInt64(arg)
 	case float64:
-		return this.writeFloat64(arg)
+		return c.writeFloat64(arg)
 	case bool:
 		if arg {
-			return this.writeString("1")
+			return c.writeString("1")
 		} else {
-			return this.writeString("0")
+			return c.writeString("0")
 		}
 	case nil:
-		return this.writeString("")
+		return c.writeString("")
 	case Argument:
 		if argumentTypeOK {
-			return this.writeArg(index, arg.RedisArg(), false)
+			return c.writeArg(arg.RedisArg(), false)
 		}
-
 		var buf bytes.Buffer
 		fmt.Fprint(&buf, arg)
-		return this.writeBytes(buf.Bytes())
+		return c.writeBytes(buf.Bytes())
 	default:
 		var buf bytes.Buffer
 		fmt.Fprint(&buf, arg)
-		return this.writeBytes(buf.Bytes())
+		return c.writeBytes(buf.Bytes())
 	}
 }
 
-func (this *connection) readLine() ([]byte, error) {
-	p, err := this.br.ReadSlice('\n')
+type protocolError string
 
+func (pe protocolError) Error() string {
+	return fmt.Sprintf("redigo: %s (possible server error or unsupported concurrent read by application)", string(pe))
+}
+
+func (c *conn) readLine() ([]byte, error) {
+	p, err := c.br.ReadSlice('\n')
 	if err == bufio.ErrBufferFull {
 		buf := append([]byte{}, p...)
-
 		for err == bufio.ErrBufferFull {
-			p, err = this.br.ReadSlice('\n')
+			p, err = c.br.ReadSlice('\n')
 			buf = append(buf, p...)
 		}
-
 		p = buf
 	}
-
 	if err != nil {
 		return nil, err
 	}
-
 	i := len(p) - 2
-
 	if i < 0 || p[i] != '\r' {
 		return nil, protocolError("bad response line terminator")
 	}
-
 	return p[:i], nil
 }
 
-func (this *connection) readReply() (interface{}, error) {
-	line, err := this.readLine()
+func parseLen(p []byte) (int, error) {
+	if len(p) == 0 {
+		return -1, protocolError("malformed length")
+	}
+
+	if p[0] == '-' && len(p) == 2 && p[1] == '1' {
+		return -1, nil
+	}
+
+	var n int
+	for _, b := range p {
+		n *= 10
+		if b < '0' || b > '9' {
+			return -1, protocolError("illegal bytes in length")
+		}
+		n += int(b - '0')
+	}
+
+	return n, nil
+}
+
+func parseInt(p []byte) (interface{}, error) {
+	if len(p) == 0 {
+		return 0, protocolError("malformed integer")
+	}
+
+	var negate bool
+	if p[0] == '-' {
+		negate = true
+		p = p[1:]
+		if len(p) == 0 {
+			return 0, protocolError("malformed integer")
+		}
+	}
+
+	var n int64
+	for _, b := range p {
+		n *= 10
+		if b < '0' || b > '9' {
+			return 0, protocolError("illegal bytes in length")
+		}
+		n += int64(b - '0')
+	}
+
+	if negate {
+		n = -n
+	}
+	return n, nil
+}
+
+var (
+	okReply   interface{} = "OK"
+	pongReply interface{} = "PONG"
+)
+
+func (c *conn) readReply() (interface{}, error) {
+	line, err := c.readLine()
 	if err != nil {
 		return nil, err
 	}
@@ -217,11 +437,11 @@ func (this *connection) readReply() (interface{}, error) {
 			return nil, err
 		}
 		p := make([]byte, n)
-		_, err = io.ReadFull(this.br, p)
+		_, err = io.ReadFull(c.br, p)
 		if err != nil {
 			return nil, err
 		}
-		if line, err := this.readLine(); err != nil {
+		if line, err := c.readLine(); err != nil {
 			return nil, err
 		} else if len(line) != 0 {
 			return nil, protocolError("bad bulk string format")
@@ -234,7 +454,7 @@ func (this *connection) readReply() (interface{}, error) {
 		}
 		r := make([]interface{}, n)
 		for i := range r {
-			r[i], err = this.readReply()
+			r[i], err = c.readReply()
 			if err != nil {
 				return nil, err
 			}
@@ -244,100 +464,94 @@ func (this *connection) readReply() (interface{}, error) {
 	return nil, protocolError("unexpected response line")
 }
 
-func (this *connection) Send(cmd string, args ...interface{}) error {
-	this.mu.Lock()
-	this.pending += 1
-	this.mu.Unlock()
-
-	if this.writeTimeout != 0 {
-		this.conn.SetWriteDeadline(time.Now().Add(this.writeTimeout))
+func (c *conn) Send(cmd string, args ...interface{}) error {
+	c.mu.Lock()
+	c.pending += 1
+	c.mu.Unlock()
+	if c.writeTimeout != 0 {
+		c.conn.SetWriteDeadline(time.Now().Add(c.writeTimeout))
 	}
-
-	if err := this.writeCommand(cmd, args); err != nil {
-		return this.fatal(err)
+	if err := c.writeCommand(cmd, args); err != nil {
+		return c.fatal(err)
 	}
-
 	return nil
 }
 
-func (this *connection) Flush() error {
-	if this.writeTimeout != 0 {
-		this.conn.SetWriteDeadline(time.Now().Add(this.writeTimeout))
+func (c *conn) Flush() error {
+	if c.writeTimeout != 0 {
+		c.conn.SetWriteDeadline(time.Now().Add(c.writeTimeout))
 	}
-
-	if err := this.bw.Flush(); err != nil {
-		return this.fatal(err)
+	if err := c.bw.Flush(); err != nil {
+		return c.fatal(err)
 	}
-
 	return nil
 }
 
-func (this *connection) Receive() (interface{}, error) {
-	return this.ReceiveWithTimeout(this.readTimeout)
+func (c *conn) Receive() (interface{}, error) {
+	return c.ReceiveWithTimeout(c.readTimeout)
 }
 
-func (this *connection) ReceiveWithTimeout(timeout time.Duration) (reply interface{}, err error) {
+func (c *conn) ReceiveWithTimeout(timeout time.Duration) (reply interface{}, err error) {
 	var deadline time.Time
-
 	if timeout != 0 {
 		deadline = time.Now().Add(timeout)
 	}
+	c.conn.SetReadDeadline(deadline)
 
-	this.conn.SetReadDeadline(deadline)
-
-	if reply, err = this.readReply(); err != nil {
-		return nil, this.fatal(err)
+	if reply, err = c.readReply(); err != nil {
+		return nil, c.fatal(err)
 	}
-
-	this.mu.Lock()
-
-	if this.pending > 0 {
-		this.pending -= 1
+	c.mu.Lock()
+	if c.pending > 0 {
+		c.pending -= 1
 	}
-
-	this.mu.Unlock()
-
+	c.mu.Unlock()
 	if err, ok := reply.(Error); ok {
 		return nil, err
 	}
-
 	return
 }
 
-func (this *connection) Do(cmd string, args ...interface{}) (interface{}, error) {
-	this.mu.Lock()
-	pending := this.pending
-	this.pending = 0
-	this.mu.Unlock()
+func (c *conn) Do(cmd string, args ...interface{}) (interface{}, error) {
+	return c.DoWithTimeout(c.readTimeout, cmd, args...)
+}
+
+func (c *conn) DoWithTimeout(readTimeout time.Duration, cmd string, args ...interface{}) (interface{}, error) {
+	c.mu.Lock()
+	pending := c.pending
+	c.pending = 0
+	c.mu.Unlock()
 
 	if cmd == "" && pending == 0 {
 		return nil, nil
 	}
 
-	if this.writeTimeout != 0 {
-		this.conn.SetWriteDeadline(time.Now().Add(this.writeTimeout))
+	if c.writeTimeout != 0 {
+		c.conn.SetWriteDeadline(time.Now().Add(c.writeTimeout))
 	}
 
 	if cmd != "" {
-		if err := this.writeCommand(cmd, args); err != nil {
-			return nil, this.fatal(err)
+		if err := c.writeCommand(cmd, args); err != nil {
+			return nil, c.fatal(err)
 		}
 	}
 
-	if err := this.bw.Flush(); err != nil {
-		return nil, this.fatal(err)
+	if err := c.bw.Flush(); err != nil {
+		return nil, c.fatal(err)
 	}
 
 	var deadline time.Time
-
-	this.conn.SetReadDeadline(deadline)
+	if readTimeout != 0 {
+		deadline = time.Now().Add(readTimeout)
+	}
+	c.conn.SetReadDeadline(deadline)
 
 	if cmd == "" {
 		reply := make([]interface{}, pending)
 		for i := range reply {
-			r, e := this.readReply()
+			r, e := c.readReply()
 			if e != nil {
-				return nil, this.fatal(e)
+				return nil, c.fatal(e)
 			}
 			reply[i] = r
 		}
@@ -346,18 +560,14 @@ func (this *connection) Do(cmd string, args ...interface{}) (interface{}, error)
 
 	var err error
 	var reply interface{}
-
 	for i := 0; i <= pending; i++ {
 		var e error
-
-		if reply, e = this.readReply(); e != nil {
-			return nil, this.fatal(e)
+		if reply, e = c.readReply(); e != nil {
+			return nil, c.fatal(e)
 		}
-
 		if e, ok := reply.(Error); ok && err == nil {
 			err = e
 		}
 	}
-
 	return reply, err
 }

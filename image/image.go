@@ -1,7 +1,7 @@
 package image
 
 import (
-	"tec/image/freetype"
+	"github.com/agilecho/tec/image/freetype"
 	"flag"
 	"image"
 	"image/color"

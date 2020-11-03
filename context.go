@@ -424,7 +424,7 @@ func (this *Context) Render(file string, data map[string]interface{}) {
 			file = paths[1]
 		}
 
-		file = "/" + module + "/view/" + strings.Replace(controller, ".", "/", -1) + "/" + file
+		file = "/" + module + "/" + strings.Replace(controller, ".", "/", -1) + "/" + file
 	}
 
 	if data == nil {

@@ -1,16 +1,17 @@
 package mysql
 
 const (
-	defaultAuthPlugin = "mysql_native_password"
+	defaultAuthPlugin       = "mysql_native_password"
 	defaultMaxAllowedPacket = 4 << 20
-	minProtocolVersion = 10
-	maxPacketSize = 1 << 24 - 1
-	timeFormat = "2006-01-02 15:04:05.999999"
+	minProtocolVersion      = 10
+	maxPacketSize           = 1<<24 - 1
+	timeFormat              = "2006-01-02 15:04:05.999999"
 )
 
 const (
 	iOK           byte = 0x00
 	iAuthMoreData byte = 0x01
+	iLocalInFile  byte = 0xfb
 	iEOF          byte = 0xfe
 	iERR          byte = 0xff
 )

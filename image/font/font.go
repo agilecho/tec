@@ -1,7 +1,7 @@
 package font
 
 import (
-	"tec/image/fixed"
+	"github.com/agilecho/tec/image/fixed"
 	"image"
 	"image/draw"
 	"io"

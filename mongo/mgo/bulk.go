@@ -2,8 +2,8 @@ package mgo
 
 import (
 	"bytes"
+	"github.com/agilecho/tec/mongo/mgo/bson"
 	"sort"
-	"tec/mongo/mgo/bson"
 )
 
 type Bulk struct {

@@ -2,10 +2,10 @@ package mgo
 
 import (
 	"errors"
+	"github.com/agilecho/tec/mongo/mgo/bson"
 	"net"
 	"sort"
 	"sync"
-	"tec/mongo/mgo/bson"
 	"time"
 )
 

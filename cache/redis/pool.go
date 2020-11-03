@@ -1,40 +1,406 @@
 package redis
 
 import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	"crypto/sha1"
 	"errors"
+	"io"
+	"strconv"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
-type Conn interface {
-	Close() error
-	Err() error
-	Do(commandName string, args ...interface{}) (reply interface{}, err error)
-	Send(commandName string, args ...interface{}) error
-	Flush() error
-	Receive() (reply interface{}, err error)
+var (
+	_ ConnWithTimeout = (*activeConn)(nil)
+	_ ConnWithTimeout = (*errorConn)(nil)
+)
+
+var nowFunc = time.Now
+var ErrPoolExhausted = errors.New("redigo: connection pool exhausted")
+var errConnClosed = errors.New("redigo: connection closed")
+var errTimeoutNotSupported = errors.New("redis: connection does not support ConnWithTimeout")
+
+type Pool struct {
+	Dial func() (Conn, error)
+	DialContext func(ctx context.Context) (Conn, error)
+	TestOnBorrow func(c Conn, t time.Time) error
+	MaxIdle int
+	MaxActive int
+	IdleTimeout time.Duration
+	Wait bool
+	MaxConnLifetime time.Duration
+
+	mu sync.Mutex
+	closed bool
+	active int
+	initOnce sync.Once
+	ch chan struct{}
+	idle idleList
+	waitCount int64
+	waitDuration time.Duration
 }
 
-type Argument interface {
-	RedisArg() interface{}
+func (p *Pool) Get() Conn {
+	c, _ := p.GetContext(context.Background())
+	return c
 }
 
-type ConnWithTimeout interface {
-	Conn
-	DoWithTimeout(timeout time.Duration, commandName string, args ...interface{}) (reply interface{}, err error)
-	ReceiveWithTimeout(timeout time.Duration) (reply interface{}, err error)
+func (p *Pool) GetContext(ctx context.Context) (Conn, error) {
+	waited, err := p.waitVacantConn(ctx)
+	if err != nil {
+		return errorConn{err}, err
+	}
+
+	p.mu.Lock()
+
+	if waited > 0 {
+		p.waitCount++
+		p.waitDuration += waited
+	}
+
+	if p.IdleTimeout > 0 {
+		n := p.idle.count
+		for i := 0; i < n && p.idle.back != nil && p.idle.back.t.Add(p.IdleTimeout).Before(nowFunc()); i++ {
+			pc := p.idle.back
+			p.idle.popBack()
+			p.mu.Unlock()
+			pc.c.Close()
+			p.mu.Lock()
+			p.active--
+		}
+	}
+
+	for p.idle.front != nil {
+		pc := p.idle.front
+		p.idle.popFront()
+		p.mu.Unlock()
+		if (p.TestOnBorrow == nil || p.TestOnBorrow(pc.c, pc.t) == nil) &&
+			(p.MaxConnLifetime == 0 || nowFunc().Sub(pc.created) < p.MaxConnLifetime) {
+			return &activeConn{p: p, pc: pc}, nil
+		}
+		pc.c.Close()
+		p.mu.Lock()
+		p.active--
+	}
+
+	if p.closed {
+		p.mu.Unlock()
+		err := errors.New("redigo: get on closed pool")
+		return errorConn{err}, err
+	}
+
+	if !p.Wait && p.MaxActive > 0 && p.active >= p.MaxActive {
+		p.mu.Unlock()
+		return errorConn{ErrPoolExhausted}, ErrPoolExhausted
+	}
+
+	p.active++
+	p.mu.Unlock()
+	c, err := p.dial(ctx)
+	if err != nil {
+		c = nil
+		p.mu.Lock()
+		p.active--
+		if p.ch != nil && !p.closed {
+			p.ch <- struct{}{}
+		}
+		p.mu.Unlock()
+		return errorConn{err}, err
+	}
+	return &activeConn{p: p, pc: &poolConn{c: c, created: nowFunc()}}, nil
 }
+
+type PoolStats struct {
+	ActiveCount int
+	IdleCount int
+	WaitCount int64
+	WaitDuration time.Duration
+}
+
+func (p *Pool) Stats() PoolStats {
+	p.mu.Lock()
+	stats := PoolStats{
+		ActiveCount:  p.active,
+		IdleCount:    p.idle.count,
+		WaitCount:    p.waitCount,
+		WaitDuration: p.waitDuration,
+	}
+	p.mu.Unlock()
+
+	return stats
+}
+
+func (p *Pool) ActiveCount() int {
+	p.mu.Lock()
+	active := p.active
+	p.mu.Unlock()
+	return active
+}
+
+func (p *Pool) IdleCount() int {
+	p.mu.Lock()
+	idle := p.idle.count
+	p.mu.Unlock()
+	return idle
+}
+
+func (p *Pool) Close() error {
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return nil
+	}
+	p.closed = true
+	p.active -= p.idle.count
+	pc := p.idle.front
+	p.idle.count = 0
+	p.idle.front, p.idle.back = nil, nil
+	if p.ch != nil {
+		close(p.ch)
+	}
+	p.mu.Unlock()
+	for ; pc != nil; pc = pc.next {
+		pc.c.Close()
+	}
+	return nil
+}
+
+func (p *Pool) lazyInit() {
+	p.initOnce.Do(func() {
+		p.ch = make(chan struct{}, p.MaxActive)
+		if p.closed {
+			close(p.ch)
+		} else {
+			for i := 0; i < p.MaxActive; i++ {
+				p.ch <- struct{}{}
+			}
+		}
+	})
+}
+
+func (p *Pool) waitVacantConn(ctx context.Context) (waited time.Duration, err error) {
+	if !p.Wait || p.MaxActive <= 0 {
+		return 0, nil
+	}
+
+	p.lazyInit()
+
+	wait := len(p.ch) == 0
+	var start time.Time
+	if wait {
+		start = time.Now()
+	}
+
+	select {
+	case <-p.ch:
+		select {
+		case <-ctx.Done():
+			p.ch <- struct{}{}
+			return 0, ctx.Err()
+		default:
+		}
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	}
+
+	if wait {
+		return time.Since(start), nil
+	}
+	return 0, nil
+}
+
+func (p *Pool) dial(ctx context.Context) (Conn, error) {
+	if p.DialContext != nil {
+		return p.DialContext(ctx)
+	}
+	if p.Dial != nil {
+		return p.Dial()
+	}
+	return nil, errors.New("redigo: must pass Dial or DialContext to pool")
+}
+
+func (p *Pool) put(pc *poolConn, forceClose bool) error {
+	p.mu.Lock()
+	if !p.closed && !forceClose {
+		pc.t = nowFunc()
+		p.idle.pushFront(pc)
+		if p.idle.count > p.MaxIdle {
+			pc = p.idle.back
+			p.idle.popBack()
+		} else {
+			pc = nil
+		}
+	}
+
+	if pc != nil {
+		p.mu.Unlock()
+		pc.c.Close()
+		p.mu.Lock()
+		p.active--
+	}
+
+	if p.ch != nil && !p.closed {
+		p.ch <- struct{}{}
+	}
+	p.mu.Unlock()
+	return nil
+}
+
+type activeConn struct {
+	p *Pool
+	pc *poolConn
+	state int
+}
+
+var (
+	sentinel []byte
+	sentinelOnce sync.Once
+)
+
+func initSentinel() {
+	p := make([]byte, 64)
+	if _, err := rand.Read(p); err == nil {
+		sentinel = p
+	} else {
+		h := sha1.New()
+		io.WriteString(h, "Oops, rand failed. Use time instead.")
+		io.WriteString(h, strconv.FormatInt(time.Now().UnixNano(), 10))
+		sentinel = h.Sum(nil)
+	}
+}
+
+func (ac *activeConn) Close() error {
+	pc := ac.pc
+	if pc == nil {
+		return nil
+	}
+	ac.pc = nil
+
+	if ac.state&connectionMultiState != 0 {
+		pc.c.Send("DISCARD")
+		ac.state &^= (connectionMultiState | connectionWatchState)
+	} else if ac.state&connectionWatchState != 0 {
+		pc.c.Send("UNWATCH")
+		ac.state &^= connectionWatchState
+	}
+	if ac.state&connectionSubscribeState != 0 {
+		pc.c.Send("UNSUBSCRIBE")
+		pc.c.Send("PUNSUBSCRIBE")
+		// To detect the end of the message stream, ask the server to echo
+		// a sentinel value and read until we see that value.
+		sentinelOnce.Do(initSentinel)
+		pc.c.Send("ECHO", sentinel)
+		pc.c.Flush()
+		for {
+			p, err := pc.c.Receive()
+			if err != nil {
+				break
+			}
+			if p, ok := p.([]byte); ok && bytes.Equal(p, sentinel) {
+				ac.state &^= connectionSubscribeState
+				break
+			}
+		}
+	}
+	pc.c.Do("")
+	ac.p.put(pc, ac.state != 0 || pc.c.Err() != nil)
+	return nil
+}
+
+func (ac *activeConn) Err() error {
+	pc := ac.pc
+	if pc == nil {
+		return errConnClosed
+	}
+	return pc.c.Err()
+}
+
+func (ac *activeConn) Do(commandName string, args ...interface{}) (reply interface{}, err error) {
+	pc := ac.pc
+	if pc == nil {
+		return nil, errConnClosed
+	}
+	ci := lookupCommandInfo(commandName)
+	ac.state = (ac.state | ci.Set) &^ ci.Clear
+	return pc.c.Do(commandName, args...)
+}
+
+func (ac *activeConn) DoWithTimeout(timeout time.Duration, commandName string, args ...interface{}) (reply interface{}, err error) {
+	pc := ac.pc
+	if pc == nil {
+		return nil, errConnClosed
+	}
+	cwt, ok := pc.c.(ConnWithTimeout)
+	if !ok {
+		return nil, errTimeoutNotSupported
+	}
+	ci := lookupCommandInfo(commandName)
+	ac.state = (ac.state | ci.Set) &^ ci.Clear
+	return cwt.DoWithTimeout(timeout, commandName, args...)
+}
+
+func (ac *activeConn) Send(commandName string, args ...interface{}) error {
+	pc := ac.pc
+	if pc == nil {
+		return errConnClosed
+	}
+	ci := lookupCommandInfo(commandName)
+	ac.state = (ac.state | ci.Set) &^ ci.Clear
+	return pc.c.Send(commandName, args...)
+}
+
+func (ac *activeConn) Flush() error {
+	pc := ac.pc
+	if pc == nil {
+		return errConnClosed
+	}
+	return pc.c.Flush()
+}
+
+func (ac *activeConn) Receive() (reply interface{}, err error) {
+	pc := ac.pc
+	if pc == nil {
+		return nil, errConnClosed
+	}
+	return pc.c.Receive()
+}
+
+func (ac *activeConn) ReceiveWithTimeout(timeout time.Duration) (reply interface{}, err error) {
+	pc := ac.pc
+	if pc == nil {
+		return nil, errConnClosed
+	}
+	cwt, ok := pc.c.(ConnWithTimeout)
+	if !ok {
+		return nil, errTimeoutNotSupported
+	}
+	return cwt.ReceiveWithTimeout(timeout)
+}
+
+type errorConn struct{ err error }
+
+func (ec errorConn) Do(string, ...interface{}) (interface{}, error) { return nil, ec.err }
+func (ec errorConn) DoWithTimeout(time.Duration, string, ...interface{}) (interface{}, error) {
+	return nil, ec.err
+}
+func (ec errorConn) Send(string, ...interface{}) error                     { return ec.err }
+func (ec errorConn) Err() error                                            { return ec.err }
+func (ec errorConn) Close() error                                          { return nil }
+func (ec errorConn) Flush() error                                          { return ec.err }
+func (ec errorConn) Receive() (interface{}, error)                         { return nil, ec.err }
+func (ec errorConn) ReceiveWithTimeout(time.Duration) (interface{}, error) { return nil, ec.err }
 
 type idleList struct {
-	count int
+	count       int
 	front, back *poolConn
 }
 
 type poolConn struct {
-	c Conn
-	t time.Time
-	created time.Time
+	c          Conn
+	t          time.Time
+	created    time.Time
 	next, prev *poolConn
 }
 
@@ -73,307 +439,4 @@ func (l *idleList) popBack() {
 		l.back = pc.prev
 	}
 	pc.next, pc.prev = nil, nil
-}
-
-
-type Pool struct {
-	Dial func() (Conn, error)
-	TestOnBorrow func(c Conn, t time.Time) error
-	MaxIdle int
-	MaxActive int
-	IdleTimeout time.Duration
-	Wait bool
-	MaxConnLifetime time.Duration
-	chInitialized uint32
-	mu sync.Mutex
-	closed bool
-	active int
-	ch chan struct{}
-	idle idleList
-	waitCount int64
-	waitDuration time.Duration
-}
-
-func (p *Pool) Get() Conn {
-	pc, err := p.get()
-	if err != nil {
-		return nil
-	}
-
-	return &activeConn{p: p, pc: pc}
-}
-
-type PoolStats struct {
-	ActiveCount int
-	IdleCount int
-	WaitCount int64
-	WaitDuration time.Duration
-}
-
-func (p *Pool) Stats() PoolStats {
-	p.mu.Lock()
-	stats := PoolStats{
-		ActiveCount:  p.active,
-		IdleCount:    p.idle.count,
-		WaitCount:    p.waitCount,
-		WaitDuration: p.waitDuration,
-	}
-	p.mu.Unlock()
-
-	return stats
-}
-
-func (p *Pool) ActiveCount() int {
-	p.mu.Lock()
-	active := p.active
-	p.mu.Unlock()
-	return active
-}
-
-func (p *Pool) IdleCount() int {
-	p.mu.Lock()
-	idle := p.idle.count
-	p.mu.Unlock()
-
-	return idle
-}
-
-func (p *Pool) Close() error {
-	p.mu.Lock()
-	if p.closed {
-		p.mu.Unlock()
-		return nil
-	}
-	p.closed = true
-	p.active -= p.idle.count
-	pc := p.idle.front
-	p.idle.count = 0
-	p.idle.front, p.idle.back = nil, nil
-	if p.ch != nil {
-		close(p.ch)
-	}
-	p.mu.Unlock()
-	for ; pc != nil; pc = pc.next {
-		pc.c.Close()
-	}
-
-	return nil
-}
-
-func (p *Pool) lazyInit() {
-	if atomic.LoadUint32(&p.chInitialized) == 1 {
-		return
-	}
-
-	p.mu.Lock()
-	if p.chInitialized == 0 {
-		p.ch = make(chan struct{}, p.MaxActive)
-		if p.closed {
-			close(p.ch)
-		} else {
-			for i := 0; i < p.MaxActive; i++ {
-				p.ch <- struct{}{}
-			}
-		}
-		atomic.StoreUint32(&p.chInitialized, 1)
-	}
-	p.mu.Unlock()
-}
-
-func (p *Pool) get() (*poolConn, error) {
-	var waited time.Duration
-	if p.Wait && p.MaxActive > 0 {
-		p.lazyInit()
-
-		wait := len(p.ch) == 0
-		var start time.Time
-		if wait {
-			start = time.Now()
-		}
-
-		<-p.ch
-
-		if wait {
-			waited = time.Since(start)
-		}
-	}
-
-	p.mu.Lock()
-
-	if waited > 0 {
-		p.waitCount++
-		p.waitDuration += waited
-	}
-
-	if p.IdleTimeout > 0 {
-		n := p.idle.count
-		for i := 0; i < n && p.idle.back != nil && p.idle.back.t.Add(p.IdleTimeout).Before(time.Now()); i++ {
-			pc := p.idle.back
-			p.idle.popBack()
-			p.mu.Unlock()
-			pc.c.Close()
-			p.mu.Lock()
-			p.active--
-		}
-	}
-
-	for p.idle.front != nil {
-		pc := p.idle.front
-		p.idle.popFront()
-		p.mu.Unlock()
-		if (p.TestOnBorrow == nil || p.TestOnBorrow(pc.c, pc.t) == nil) &&
-			(p.MaxConnLifetime == 0 || time.Now().Sub(pc.created) < p.MaxConnLifetime) {
-			return pc, nil
-		}
-		pc.c.Close()
-		p.mu.Lock()
-		p.active--
-	}
-
-	if p.closed {
-		p.mu.Unlock()
-		return nil, errors.New("redigo: get on closed pool")
-	}
-
-	if !p.Wait && p.MaxActive > 0 && p.active >= p.MaxActive {
-		p.mu.Unlock()
-		return nil, errors.New("redigo: connection pool exhausted")
-	}
-
-	p.active++
-	p.mu.Unlock()
-	c, err := p.dial()
-	if err != nil {
-		c = nil
-		p.mu.Lock()
-		p.active--
-		if p.ch != nil && !p.closed {
-			p.ch <- struct{}{}
-		}
-		p.mu.Unlock()
-	}
-
-	return &poolConn{c: c, created: time.Now()}, err
-}
-
-func (p *Pool) dial() (Conn, error) {
-	return p.Dial()
-}
-
-func (p *Pool) put(pc *poolConn, forceClose bool) error {
-	p.mu.Lock()
-	if !p.closed && !forceClose {
-		pc.t = time.Now()
-		p.idle.pushFront(pc)
-		if p.idle.count > p.MaxIdle {
-			pc = p.idle.back
-			p.idle.popBack()
-		} else {
-			pc = nil
-		}
-	}
-
-	if pc != nil {
-		p.mu.Unlock()
-		pc.c.Close()
-		p.mu.Lock()
-		p.active--
-	}
-
-	if p.ch != nil && !p.closed {
-		p.ch <- struct{}{}
-	}
-	p.mu.Unlock()
-
-	return nil
-}
-
-type activeConn struct {
-	p *Pool
-	pc *poolConn
-	state int
-}
-
-func (ac *activeConn) Close() error {
-	pc := ac.pc
-	if pc == nil {
-		return nil
-	}
-	ac.pc = nil
-
-	pc.c.Do("")
-	ac.p.put(pc, pc.c.Err() != nil)
-
-	return nil
-}
-
-func (ac *activeConn) Err() error {
-	pc := ac.pc
-	if pc == nil {
-		return errors.New("redigo: connection closed")
-	}
-
-	return pc.c.Err()
-}
-
-func (ac *activeConn) Do(commandName string, args ...interface{}) (reply interface{}, err error) {
-	pc := ac.pc
-	if pc == nil {
-		return nil, errors.New("redigo: connection closed")
-	}
-
-	return pc.c.Do(commandName, args...)
-}
-
-func (ac *activeConn) DoWithTimeout(timeout time.Duration, commandName string, args ...interface{}) (reply interface{}, err error) {
-	pc := ac.pc
-	if pc == nil {
-		return nil, errors.New("redigo: connection closed")
-	}
-	cwt, ok := pc.c.(ConnWithTimeout)
-	if !ok {
-		return nil, errTimeoutNotSupported
-	}
-
-	return cwt.DoWithTimeout(timeout, commandName, args...)
-}
-
-func (ac *activeConn) Send(commandName string, args ...interface{}) error {
-	pc := ac.pc
-	if pc == nil {
-		return errors.New("redigo: connection closed")
-	}
-
-	return pc.c.Send(commandName, args...)
-}
-
-func (ac *activeConn) Flush() error {
-	pc := ac.pc
-	if pc == nil {
-		return errors.New("redigo: connection closed")
-	}
-
-	return pc.c.Flush()
-}
-
-func (ac *activeConn) Receive() (reply interface{}, err error) {
-	pc := ac.pc
-	if pc == nil {
-		return nil, errors.New("redigo: connection closed")
-	}
-
-	return pc.c.Receive()
-}
-
-func (ac *activeConn) ReceiveWithTimeout(timeout time.Duration) (reply interface{}, err error) {
-	pc := ac.pc
-	if pc == nil {
-		return nil, errors.New("redigo: connection closed")
-	}
-	cwt, ok := pc.c.(ConnWithTimeout)
-	if !ok {
-		return nil, errTimeoutNotSupported
-	}
-
-	return cwt.ReceiveWithTimeout(timeout)
 }

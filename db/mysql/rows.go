@@ -56,7 +56,7 @@ func (rows *mysqlRows) ColumnTypeDatabaseTypeName(i int) string {
 }
 
 func (rows *mysqlRows) ColumnTypeNullable(i int) (nullable, ok bool) {
-	return rows.rs.columns[i].flags & flagNotNULL == 0, true
+	return rows.rs.columns[i].flags&flagNotNULL == 0, true
 }
 
 func (rows *mysqlRows) ColumnTypePrecisionScale(i int) (int64, int64, bool) {
@@ -68,7 +68,6 @@ func (rows *mysqlRows) ColumnTypePrecisionScale(i int) (int64, int64, bool) {
 		if decimals > 0 {
 			return int64(column.length) - 2, decimals, true
 		}
-
 		return int64(column.length) - 1, decimals, true
 	case fieldTypeTimestamp, fieldTypeDateTime, fieldTypeTime:
 		return decimals, decimals, true
@@ -76,7 +75,6 @@ func (rows *mysqlRows) ColumnTypePrecisionScale(i int) (int64, int64, bool) {
 		if decimals == 0x1f {
 			return math.MaxInt64, math.MaxInt64, true
 		}
-
 		return math.MaxInt64, decimals, true
 	}
 
@@ -106,7 +104,6 @@ func (rows *mysqlRows) Close() (err error) {
 	if !rows.rs.done {
 		err = mc.readUntilEOF()
 	}
-
 	if err == nil {
 		if err = mc.discardResults(); err != nil {
 			return err
@@ -121,7 +118,6 @@ func (rows *mysqlRows) HasNextResultSet() (b bool) {
 	if rows.mc == nil {
 		return false
 	}
-
 	return rows.mc.status&statusMoreResultsExists != 0
 }
 
@@ -129,7 +125,6 @@ func (rows *mysqlRows) nextResultSet() (int, error) {
 	if rows.mc == nil {
 		return 0, io.EOF
 	}
-
 	if err := rows.mc.error(); err != nil {
 		return 0, err
 	}
@@ -145,7 +140,6 @@ func (rows *mysqlRows) nextResultSet() (int, error) {
 		rows.mc = nil
 		return 0, io.EOF
 	}
-
 	rows.rs = resultSet{}
 	return rows.mc.readResultSetHeaderPacket()
 }

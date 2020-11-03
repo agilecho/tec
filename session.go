@@ -1,8 +1,8 @@
 package tec
 
 import (
-	"tec/cache"
-	"tec/db"
+	"github.com/agilecho/tec/cache"
+	"github.com/agilecho/tec/db"
 	"io/ioutil"
 	"net/http"
 	"os"

@@ -2,6 +2,7 @@ package mysql
 
 import (
 	"database/sql/driver"
+	"encoding/json"
 	"fmt"
 	"io"
 	"reflect"
@@ -31,6 +32,11 @@ func (stmt *mysqlStmt) ColumnConverter(idx int) driver.ValueConverter {
 	return converter{}
 }
 
+func (stmt *mysqlStmt) CheckNamedValue(nv *driver.NamedValue) (err error) {
+	nv.Value, err = converter{}.ConvertValue(nv.Value)
+	return
+}
+
 func (stmt *mysqlStmt) Exec(args []driver.Value) (driver.Result, error) {
 	if stmt.mc.closed.IsSet() {
 		errLog.Print(ErrInvalidConn)
@@ -56,7 +62,6 @@ func (stmt *mysqlStmt) Exec(args []driver.Value) (driver.Result, error) {
 		if err = mc.readUntilEOF(); err != nil {
 			return nil, err
 		}
-
 		if err := mc.readUntilEOF(); err != nil {
 			return nil, err
 		}
@@ -113,6 +118,8 @@ func (stmt *mysqlStmt) query(args []driver.Value) (*binaryRows, error) {
 	return rows, err
 }
 
+var jsonType = reflect.TypeOf(json.RawMessage{})
+
 type converter struct{}
 
 func (c converter) ConvertValue(v interface{}) (driver.Value, error) {
@@ -125,12 +132,15 @@ func (c converter) ConvertValue(v interface{}) (driver.Value, error) {
 		if err != nil {
 			return nil, err
 		}
-		if !driver.IsValue(sv) {
-			return nil, fmt.Errorf("non-Value type %T returned from Value", sv)
+		if driver.IsValue(sv) {
+			return sv, nil
 		}
-		return sv, nil
-	}
 
+		if u, ok := sv.(uint64); ok {
+			return u, nil
+		}
+		return nil, fmt.Errorf("non-Value type %T returned from Value", sv)
+	}
 	rv := reflect.ValueOf(v)
 	switch rv.Kind() {
 	case reflect.Ptr:
@@ -148,11 +158,14 @@ func (c converter) ConvertValue(v interface{}) (driver.Value, error) {
 	case reflect.Bool:
 		return rv.Bool(), nil
 	case reflect.Slice:
-		ek := rv.Type().Elem().Kind()
-		if ek == reflect.Uint8 {
+		switch t := rv.Type(); {
+		case t == jsonType:
+			return v, nil
+		case t.Elem().Kind() == reflect.Uint8:
 			return rv.Bytes(), nil
+		default:
+			return nil, fmt.Errorf("unsupported type %T, a slice of %s", v, t.Elem().Kind())
 		}
-		return nil, fmt.Errorf("unsupported type %T, a slice of %s", v, ek)
 	case reflect.String:
 		return rv.String(), nil
 	}
