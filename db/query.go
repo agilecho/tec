@@ -285,6 +285,10 @@ func (this *Query) Insert(row Row) int64 {
 	return Insert(this.table, row)
 }
 
+func (this *Query) InsertBatch(rows []Row) int64 {
+	return InsertBatch(this.table, rows)
+}
+
 func (this *Query) Create() int64 {
 	if this.table == "" {
 		return 0

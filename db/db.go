@@ -120,6 +120,26 @@ func (this *TxWrapper) Insert(table string, row Row) int64 {
 	return insertid
 }
 
+func (this *TxWrapper) InsertBatch(table string, rows []Row) int64 {
+	if len(rows) == 0 {
+		return -1
+	}
+
+	tsql, args := buildInsertBatchTsql(table, rows)
+	result := this.Execute(tsql, args...)
+	if result == nil {
+		return -1
+	}
+
+	affected, err := result.RowsAffected()
+	if err != nil {
+		logger("db.TxWrapper.Insert.RowsAffected error:" + err.Error())
+		return -1
+	}
+
+	return affected
+}
+
 func (this *TxWrapper) Update(table string, row Row, condition string, args ...interface{}) int64 {
 	tsql, argsNew := buildUpdateTsql(table, row, condition, args...)
 	result := this.Execute(tsql, argsNew...)
@@ -364,6 +384,55 @@ func buildInsertTsql(table string, row Row) (string, []interface{}) {
 	}
 
 	tsql.WriteString(")")
+
+	return tsql.String(), args
+}
+
+func buildInsertBatchTsql(table string, rows []Row) (string, []interface{}) {
+	var tsql = strings.Builder{}
+
+	tsql.WriteString("INSERT INTO ")
+	tsql.WriteString(table)
+	tsql.WriteString("(")
+
+	args := []interface{}{}
+	columns := []string{}
+	var num = 0
+	for key, _ := range rows[0] {
+		columns = append(columns, key)
+
+		tsql.WriteString("`")
+		tsql.WriteString(key)
+		tsql.WriteString("`")
+
+		if num < len(rows[0]) - 1 {
+			tsql.WriteString(",")
+		}
+
+		num++
+	}
+
+	tsql.WriteString(") VALUES")
+
+	for i, row := range rows {
+		tsql.WriteString("(")
+
+		for j, column := range columns {
+			tsql.WriteString("?")
+
+			if j < len(columns) - 1 {
+				tsql.WriteString(",")
+			}
+
+			args = append(args, row[column])
+		}
+
+		tsql.WriteString(")")
+
+		if i < len(rows) - 1 {
+			tsql.WriteString(",")
+		}
+	}
 
 	return tsql.String(), args
 }
@@ -633,6 +702,27 @@ func Insert(table string, row Row) int64 {
 	}
 
 	return insertid
+}
+
+func InsertBatch(table string, rows []Row) int64 {
+	if len(rows) == 0 {
+		return -1
+	}
+
+	tsql, args := buildInsertBatchTsql(table, rows)
+
+	result := Execute(tsql, args...)
+	if result == nil {
+		return -1
+	}
+
+	affected, err := result.RowsAffected()
+	if err != nil {
+		logger("db.InsertBatch.RowsAffected error:" + err.Error())
+		return -1
+	}
+
+	return affected
 }
 
 func Update(table string, row Row, condition string, args ...interface{}) int64 {
