@@ -14,56 +14,6 @@ import (
 	"time"
 )
 
-type Config struct {
-	Host string
-	Port string
-	User string
-	Passwd string
-	Database string
-	Charset string
-	Prefix string
-	Pool int
-	Active int
-	Timeout int
-	Deploy bool
-	Slave string
-	Debug bool
-	Logs string
-}
-
-func (this *Config) Set(key string, value string) {
-	switch strings.ToLower(key) {
-	case "host":
-		this.Host = value
-	case "port":
-		this.Port = value
-	case "user":
-		this.User = value
-	case "passwd":
-		this.Passwd = value
-	case "database":
-		this.Database = value
-	case "charset":
-		this.Charset = value
-	case "prefix":
-		this.Prefix = value
-	case "pool":
-		this.Pool, _ = strconv.Atoi(value)
-	case "active":
-		this.Active, _ = strconv.Atoi(value)
-	case "timeout":
-		this.Timeout, _ = strconv.Atoi(value)
-	case "deploy":
-		this.Deploy, _ = strconv.ParseBool(value)
-	case "slave":
-		this.Slave = value
-	case "logs":
-		this.Logs = value
-	case "debug":
-		this.Debug, _ = strconv.ParseBool(value)
-	}
-}
-
 type argWrapper struct {
 	Args []interface{}
 	Callback func(rows *sql.Rows)
@@ -85,6 +35,11 @@ func (this *argWrapper) Parse() *argWrapper {
 	return this
 }
 
+type linkWrapper struct {
+	handler *sql.DB
+	lifetime int64
+}
+
 type Row map[string]interface{}
 
 func (this Row) Float64(key string) float64 {
@@ -92,264 +47,6 @@ func (this Row) Float64(key string) float64 {
 	return val
 }
 
-type TxWrapper struct {
-	handler *sql.Tx
-}
-
-func (this *TxWrapper) Rollback() error {
-	return this.handler.Rollback()
-}
-
-func (this *TxWrapper) Commit() error {
-	return this.handler.Commit()
-}
-
-func (this *TxWrapper) Insert(table string, row Row) int64 {
-	tsql, args := buildInsertTsql(table, row)
-	result := this.Execute(tsql, args...)
-	if result == nil {
-		return -1
-	}
-
-	insertid, err := result.LastInsertId()
-	if err != nil {
-		logger("db.TxWrapper.Insert.LastInsertId error:" + err.Error())
-		return -1
-	}
-
-	return insertid
-}
-
-func (this *TxWrapper) InsertBatch(table string, rows []Row) int64 {
-	if len(rows) == 0 {
-		return -1
-	}
-
-	tsql, args := buildInsertBatchTsql(table, rows)
-	result := this.Execute(tsql, args...)
-	if result == nil {
-		return -1
-	}
-
-	affected, err := result.RowsAffected()
-	if err != nil {
-		logger("db.TxWrapper.Insert.RowsAffected error:" + err.Error())
-		return -1
-	}
-
-	return affected
-}
-
-func (this *TxWrapper) Update(table string, row Row, condition string, args ...interface{}) int64 {
-	tsql, argsNew := buildUpdateTsql(table, row, condition, args...)
-	result := this.Execute(tsql, argsNew...)
-	if result == nil {
-		return -1
-	}
-
-	affected, err := result.RowsAffected()
-	if err != nil {
-		logger("db.TxWrapper.Update.RowsAffected error:" + err.Error())
-		return -1
-	}
-
-	return affected
-}
-
-func (this *TxWrapper) Delete(table string, condition string, args ...interface{}) int64 {
-	result := this.Execute(buildDeleteTsql(table, condition), args...)
-	if result == nil {
-		return -1
-	}
-
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return -1
-	}
-
-	return affected
-}
-
-func (this *TxWrapper) Execute(tsql string, args ...interface{}) sql.Result {
-	if CONFIG != nil && CONFIG.Debug {
-		result, _ := json.Marshal(args)
-		logger("db.TxWrapper.Execute tsql:" + tsql + " arg:" + string(result))
-	}
-
-	result, err := this.handler.Exec(tsql, args...)
-	if err != nil {
-		logger("db.TxWrapper.Execute.Exec error:" + err.Error())
-		return nil
-	}
-
-	return result
-}
-
-type linkWrapper struct {
-	handler *sql.DB
-	lifetime int64
-}
-
-var CONFIG *Config
-var linkMaster *linkWrapper
-var linkSlaves []*linkWrapper
-var rwMu = &sync.RWMutex{}
-
-// mysql error log
-func logger(message string) {
-	if CONFIG == nil {
-		return
-	}
-
-	now := time.Now()
-
-	var text = strings.Builder{}
-
-	text.WriteString(now.Format("2006-01-02 15:04:05"))
-	text.WriteString("(")
-	text.WriteString(strconv.FormatFloat(float64(now.UnixNano() / 1e6) * 0.001, 'f', 4, 64))
-	text.WriteString(") ")
-	text.WriteString(message)
-	text.WriteString("\r\n")
-
-	if CONFIG.Debug  {
-		fmt.Print(text.String())
-	}
-	
-	go func(data string, config *Config) {
-		rwMu.Lock()
-		defer rwMu.Unlock()
-
-		err := os.MkdirAll(config.Logs + "/" + time.Now().Format("20060102"), os.ModePerm)
-		if err != nil {
-			return
-		}
-
-		file, _ := os.OpenFile(config.Logs + "/" + time.Now().Format("20060102") + "/" + strconv.Itoa(time.Now().Hour()) + ".txt", os.O_RDWR | os.O_CREATE | os.O_APPEND, 0666)
-		defer file.Close()
-
-		_, err = file.WriteString(data)
-	}(text.String(), CONFIG)
-}
-
-func Init(config *Config) {
-	if config.Pool < 5 {
-		config.Pool = 5
-	}
-
-	if config.Active < 1 {
-		config.Active = 1
-	}
-
-	sql.Register("mysql", &mysql.MySQLDriver{})
-
-	linkMaster = buildLink(config)
-	if config.Deploy {
-		slaves := strings.Split(config.Slave, ",")
-		for _, slave := range slaves {
-			conf := &Config {
-				Host: slave,
-				Port: config.Port,
-				User: config.User,
-				Passwd: config.Passwd,
-				Database: config.Database,
-				Charset: config.Charset,
-				Pool: config.Pool,
-				Active: config.Active,
-				Timeout: config.Timeout,
-			}
-
-			linkSlaves = append(linkSlaves, buildLink(conf))
-		}
-	}
-
-	CONFIG = config
-}
-
-func Ping() {
-	if linkMaster != nil {
-		if linkMaster.lifetime < time.Now().Unix() - 7200 {
-			linkMaster.handler.Query("SELECT 1")
-			linkMaster.lifetime = time.Now().Unix()
-		}
-	}
-
-	for _, link := range linkSlaves {
-		if link.lifetime < time.Now().Unix() - 7200 {
-			link.handler.Query("SELECT 1")
-			link.lifetime = time.Now().Unix()
-		}
-	}
-}
-
-func Close() {
-	if linkMaster != nil {
-		linkMaster.handler.Close()
-	}
-
-	for _, link := range linkSlaves {
-		link.handler.Close()
-	}
-}
-
-func buildLink(config *Config) *linkWrapper {
-	var builder = strings.Builder{}
-
-	builder.WriteString(config.User)
-	builder.WriteString(":")
-	builder.WriteString(config.Passwd)
-	builder.WriteString("@tcp(")
-	builder.WriteString(config.Host)
-	builder.WriteString(":")
-	builder.WriteString(config.Port)
-	builder.WriteString(")/")
-	builder.WriteString(config.Database)
-	builder.WriteString("?charset=")
-	builder.WriteString(config.Charset)
-
-	link, _ := sql.Open("mysql", builder.String())
-
-	if config.Pool < 5 {
-		config.Pool = 5
-	}
-
-	if config.Active < 1 {
-		config.Active = 1
-	}
-
-	if config.Timeout < 1 {
-		config.Timeout = 3600
-	}
-
-	link.SetMaxOpenConns(config.Pool)
-	link.SetMaxIdleConns(config.Active)
-
-	link.SetConnMaxLifetime(time.Duration(config.Timeout) * time.Second)
-
-	return &linkWrapper{handler:link, lifetime:time.Now().Unix()}
-}
-
-func buildLinkOfMaster() *linkWrapper {
-	if linkMaster == nil {
-		return nil
-	}
-
-	linkMaster.lifetime = time.Now().Unix()
-	return linkMaster
-}
-
-func buildLinkOfSlave() *linkWrapper {
-	if len(linkSlaves) == 0 {
-		return buildLinkOfMaster()
-	}
-
-	random := rand.New(rand.NewSource(time.Now().UnixNano()))
-
-	link := linkSlaves[random.Intn(len(linkSlaves) - 1)]
-	link.lifetime = time.Now().Unix()
-
-	return link;
-}
 
 func buildInsertTsql(table string, row Row) (string, []interface{}) {
 	var tsql = strings.Builder{}
@@ -548,7 +245,241 @@ func buildItem(column *sql.ColumnType, col interface{}) interface{} {
 	return result
 }
 
-func buildRow(rows *sql.Rows, columns []*sql.ColumnType) Row {
+type TxWrapper struct {
+	db *Db
+	handler *sql.Tx
+}
+
+func (this *TxWrapper) Rollback() error {
+	return this.handler.Rollback()
+}
+
+func (this *TxWrapper) Commit() error {
+	return this.handler.Commit()
+}
+
+func (this *TxWrapper) Insert(table string, row Row) int64 {
+	tsql, args := buildInsertTsql(table, row)
+	result := this.Execute(tsql, args...)
+	if result == nil {
+		return -1
+	}
+
+	insertid, err := result.LastInsertId()
+	if err != nil {
+		this.db.logger("db.TxWrapper.Insert.LastInsertId error:" + err.Error())
+		return -1
+	}
+
+	return insertid
+}
+
+func (this *TxWrapper) InsertBatch(table string, rows []Row) int64 {
+	if len(rows) == 0 {
+		return -1
+	}
+
+	tsql, args := buildInsertBatchTsql(table, rows)
+	result := this.Execute(tsql, args...)
+	if result == nil {
+		return -1
+	}
+
+	affected, err := result.RowsAffected()
+	if err != nil {
+		this.db.logger("db.TxWrapper.Insert.RowsAffected error:" + err.Error())
+		return -1
+	}
+
+	return affected
+}
+
+func (this *TxWrapper) Update(table string, row Row, condition string, args ...interface{}) int64 {
+	tsql, argsNew := buildUpdateTsql(table, row, condition, args...)
+	result := this.Execute(tsql, argsNew...)
+	if result == nil {
+		return -1
+	}
+
+	affected, err := result.RowsAffected()
+	if err != nil {
+		this.db.logger("db.TxWrapper.Update.RowsAffected error:" + err.Error())
+		return -1
+	}
+
+	return affected
+}
+
+func (this *TxWrapper) Delete(table string, condition string, args ...interface{}) int64 {
+	result := this.Execute(buildDeleteTsql(table, condition), args...)
+	if result == nil {
+		return -1
+	}
+
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return -1
+	}
+
+	return affected
+}
+
+func (this *TxWrapper) Execute(tsql string, args ...interface{}) sql.Result {
+	if this.db.config != nil && this.db.config.Debug {
+		result, _ := json.Marshal(args)
+		this.db.logger("db.TxWrapper.Execute tsql:" + tsql + " arg:" + string(result))
+	}
+
+	result, err := this.handler.Exec(tsql, args...)
+	if err != nil {
+		this.db.logger("db.TxWrapper.Execute.Exec error:" + err.Error())
+		return nil
+	}
+
+	return result
+}
+
+type Config struct {
+	Host string
+	Port string
+	User string
+	Passwd string
+	Database string
+	Charset string
+	Prefix string
+	Pool int
+	Active int
+	Timeout int
+	Deploy bool
+	Slave string
+	Debug bool
+	Logs string
+}
+
+func (this *Config) Set(key string, value string) {
+	switch strings.ToLower(key) {
+	case "host":
+		this.Host = value
+	case "port":
+		this.Port = value
+	case "user":
+		this.User = value
+	case "passwd":
+		this.Passwd = value
+	case "database":
+		this.Database = value
+	case "charset":
+		this.Charset = value
+	case "prefix":
+		this.Prefix = value
+	case "pool":
+		this.Pool, _ = strconv.Atoi(value)
+	case "active":
+		this.Active, _ = strconv.Atoi(value)
+	case "timeout":
+		this.Timeout, _ = strconv.Atoi(value)
+	case "deploy":
+		this.Deploy, _ = strconv.ParseBool(value)
+	case "slave":
+		this.Slave = value
+	case "logs":
+		this.Logs = value
+	case "debug":
+		this.Debug, _ = strconv.ParseBool(value)
+	}
+}
+
+type Db struct {
+	config *Config
+	linkMaster *linkWrapper
+	linkSlaves []*linkWrapper
+	mu sync.RWMutex
+}
+
+func (this *Db) microtime() string {
+	return strconv.FormatFloat(float64(time.Now().UnixNano() / 1e6) * 0.001, 'f', 4, 64)
+}
+
+func (this *Db) logger(message string) {
+	if this.config == nil {
+		return
+	}
+
+	now := time.Now()
+
+	var text = strings.Builder{}
+	text.WriteString(fmt.Sprintf("%v%v%v%v%v%v", now.Format("2006-01-02 15:04:05"), "(", this.microtime(), ") ", message, "\r\n"))
+
+	if this.config.Debug {
+		fmt.Print(text.String())
+	}
+
+	go func(data string, that *Db) {
+		that.mu.Lock()
+		defer that.mu.Unlock()
+
+		err := os.MkdirAll(that.config.Logs + "/" + time.Now().Format("200601"), os.ModePerm)
+		if err != nil {
+			return
+		}
+
+		file, _ := os.OpenFile(that.config.Logs + "/" + time.Now().Format("200601") + "/" + time.Now().Format("2006010215") + ".txt", os.O_RDWR | os.O_CREATE | os.O_APPEND, 0666)
+		defer file.Close()
+
+		file.WriteString(data)
+	}(text.String(), this)
+}
+
+func (this *Db) buildLink(config *Config) *linkWrapper {
+	link, err := sql.Open("mysql", fmt.Sprintf("%v:%v@tcp(%v:%v)/%v?charset=%v", config.User, config.Passwd, config.Host, config.Port, config.Database, config.Charset))
+	if err != nil {
+		this.logger("db.open error:" + err.Error())
+		return nil
+	}
+
+	if config.Pool < 5 {
+		config.Pool = 5
+	}
+
+	if config.Active < 1 {
+		config.Active = 1
+	}
+
+	if config.Timeout < 1 {
+		config.Timeout = 3600
+	}
+
+	link.SetMaxOpenConns(config.Pool)
+	link.SetMaxIdleConns(config.Active)
+
+	link.SetConnMaxLifetime(time.Duration(config.Timeout) * time.Second)
+
+	return &linkWrapper{handler:link, lifetime:time.Now().Unix()}
+}
+
+func (this *Db) buildLinkOfMaster() *linkWrapper {
+	if this.linkMaster == nil {
+		return nil
+	}
+
+	this.linkMaster.lifetime = time.Now().Unix()
+	return this.linkMaster
+}
+
+func (this *Db) buildLinkOfSlave() *linkWrapper {
+	if len(this.linkSlaves) == 0 {
+		return this.buildLinkOfMaster()
+	}
+
+	random := rand.New(rand.NewSource(time.Now().UnixNano()))
+
+	link := this.linkSlaves[random.Intn(len(this.linkSlaves) - 1)]
+	link.lifetime = time.Now().Unix()
+
+	return link
+}
+
+func (this *Db) buildRow(rows *sql.Rows, columns []*sql.ColumnType) Row {
 	scans := make([]interface{}, len(columns))
 	values := make([]interface{}, len(columns))
 
@@ -558,7 +489,7 @@ func buildRow(rows *sql.Rows, columns []*sql.ColumnType) Row {
 
 	err := rows.Scan(scans...)
 	if err != nil {
-		logger("db.buildRow.Scan error:" + err.Error())
+		this.logger("db.buildRow.Scan error:" + err.Error())
 		return nil
 	}
 
@@ -571,13 +502,13 @@ func buildRow(rows *sql.Rows, columns []*sql.ColumnType) Row {
 	return result
 }
 
-func query(tsql string, args ...interface{}) (*sql.Rows, error) {
-	if CONFIG != nil && CONFIG.Debug {
+func (this *Db) query(tsql string, args ...interface{}) (*sql.Rows, error) {
+	if this.config != nil && this.config.Debug {
 		result, _ := json.Marshal(args)
-		logger("db.query tsql:" + tsql + " arg:" + string(result))
+		this.logger("db.query tsql:" + tsql + " arg:" + string(result))
 	}
 
-	link := buildLinkOfSlave()
+	link := this.buildLinkOfSlave()
 	if link == nil {
 		return nil, nil
 	}
@@ -598,12 +529,12 @@ func query(tsql string, args ...interface{}) (*sql.Rows, error) {
 	}
 }
 
-func FetchRows(tsql string, args ...interface{}) []Row {
+func (this *Db) FetchRows(tsql string, args ...interface{}) []Row {
 	scope := (&argWrapper{Args:args}).Parse()
 
-	rows, err := query(tsql, scope.Args...)
+	rows, err := this.query(tsql, scope.Args...)
 	if err != nil {
-		logger("db.FetchRows.query error:" + err.Error())
+		this.logger("db.FetchRows.query error:" + err.Error())
 		return []Row{}
 	}
 
@@ -617,24 +548,24 @@ func FetchRows(tsql string, args ...interface{}) []Row {
 
 	columns, err := rows.ColumnTypes()
 	if err != nil {
-		logger("db.FetchRows.ColumnTypes error:" + err.Error())
+		this.logger("db.FetchRows.ColumnTypes error:" + err.Error())
 		return []Row{}
 	}
 
 	for rows.Next() {
-		result = append(result, buildRow(rows, columns))
+		result = append(result, this.buildRow(rows, columns))
 	}
 
 	return result
 }
 
-func FetchFirst(tsql string, args ...interface{}) Row {
+func (this *Db) FetchFirst(tsql string, args ...interface{}) Row {
 	tsql = buildLimitTsql(tsql)
 	scope := (&argWrapper{Args:args}).Parse()
 
-	rows, err := query(tsql, scope.Args...)
+	rows, err := this.query(tsql, scope.Args...)
 	if err != nil {
-		logger("db.FetchFirst error:" + err.Error())
+		this.logger("db.FetchFirst error:" + err.Error())
 		return nil
 	}
 
@@ -646,23 +577,23 @@ func FetchFirst(tsql string, args ...interface{}) Row {
 
 	columns, err := rows.ColumnTypes()
 	if err != nil {
-		logger("db.FetchFirst.ColumnTypes error:" + err.Error())
+		this.logger("db.FetchFirst.ColumnTypes error:" + err.Error())
 		return nil
 	}
 
 	if rows.Next() {
-		return buildRow(rows, columns)
+		return this.buildRow(rows, columns)
 	}
 
 	return nil
 }
 
-func ResultFirst(tsql string, args ...interface{}) interface{} {
+func (this *Db) ResultFirst(tsql string, args ...interface{}) interface{} {
 	scope := (&argWrapper{Args:args}).Parse()
 
-	rows, err := query(tsql, scope.Args...)
+	rows, err := this.query(tsql, scope.Args...)
 	if err != nil {
-		logger("db.ResultFirst.query error:" + err.Error())
+		this.logger("db.ResultFirst.query error:" + err.Error())
 		return nil
 	}
 
@@ -674,7 +605,7 @@ func ResultFirst(tsql string, args ...interface{}) interface{} {
 
 	columns, err := rows.ColumnTypes()
 	if err != nil {
-		logger("db.ResultFirst.ColumnTypes error:" + err.Error())
+		this.logger("db.ResultFirst.ColumnTypes error:" + err.Error())
 		return nil
 	}
 
@@ -687,85 +618,85 @@ func ResultFirst(tsql string, args ...interface{}) interface{} {
 	return nil
 }
 
-func Insert(table string, row Row) int64 {
+func (this *Db) Insert(table string, row Row) int64 {
 	tsql, args := buildInsertTsql(table, row)
 
-	result := Execute(tsql, args...)
+	result := this.Execute(tsql, args...)
 	if result == nil {
 		return -1
 	}
 
 	insertid, err := result.LastInsertId()
 	if err != nil {
-		logger("db.Insert.LastInsertId error:" + err.Error())
+		this.logger("db.Insert.LastInsertId error:" + err.Error())
 		return -1
 	}
 
 	return insertid
 }
 
-func InsertBatch(table string, rows []Row) int64 {
+func (this *Db) InsertBatch(table string, rows []Row) int64 {
 	if len(rows) == 0 {
 		return -1
 	}
 
 	tsql, args := buildInsertBatchTsql(table, rows)
 
-	result := Execute(tsql, args...)
+	result := this.Execute(tsql, args...)
 	if result == nil {
 		return -1
 	}
 
 	affected, err := result.RowsAffected()
 	if err != nil {
-		logger("db.InsertBatch.RowsAffected error:" + err.Error())
+		this.logger("db.InsertBatch.RowsAffected error:" + err.Error())
 		return -1
 	}
 
 	return affected
 }
 
-func Update(table string, row Row, condition string, args ...interface{}) int64 {
+func (this *Db) Update(table string, row Row, condition string, args ...interface{}) int64 {
 	tsql, argsNew := buildUpdateTsql(table, row, condition, args...)
-	result := Execute(tsql, argsNew...)
-	if result == nil {
-		return -1
-	}
-	
-	affected, err := result.RowsAffected()
-	if err != nil {
-		logger("db.Update.RowsAffected error:" + err.Error())
-		return -1
-	}
-
-	return affected
-}
-
-func Delete(table string, condition string, args ...interface{}) int64 {
-	result := Execute(buildDeleteTsql(table, condition), args...)
+	result := this.Execute(tsql, argsNew...)
 	if result == nil {
 		return -1
 	}
 
 	affected, err := result.RowsAffected()
 	if err != nil {
-		logger("db.Delete.RowsAffected error:" + err.Error())
+		this.logger("db.Update.RowsAffected error:" + err.Error())
 		return -1
 	}
 
 	return affected
 }
 
-func Execute(tsql string, args ...interface{}) sql.Result {
-	if CONFIG != nil && CONFIG.Debug {
+func (this *Db) Delete(table string, condition string, args ...interface{}) int64 {
+	result := this.Execute(buildDeleteTsql(table, condition), args...)
+	if result == nil {
+		return -1
+	}
+
+	affected, err := result.RowsAffected()
+	if err != nil {
+		this.logger("db.Delete.RowsAffected error:" + err.Error())
+		return -1
+	}
+
+	return affected
+}
+
+func (this *Db) Execute(tsql string, args ...interface{}) sql.Result {
+	if this.config != nil && this.config.Debug {
 		result, _ := json.Marshal(args)
-		logger("db.Execute tsql:" + tsql + " arg:" + string(result))
+		this.logger("db.Execute tsql:" + tsql + " arg:" + string(result))
 	}
 
 	var result sql.Result
 	var err error
 
-	link := buildLinkOfMaster()
+	link := this.buildLinkOfMaster()
 	if link == nil {
 		return nil
 	}
@@ -778,7 +709,7 @@ func Execute(tsql string, args ...interface{}) sql.Result {
 		stmt, err = link.handler.Prepare(tsql)
 		defer stmt.Close()
 		if err != nil {
-			logger("db.Execute Prepare error:" + err.Error())
+			this.logger("db.Execute Prepare error:" + err.Error())
 			return nil
 		}
 
@@ -786,41 +717,145 @@ func Execute(tsql string, args ...interface{}) sql.Result {
 	}
 
 	if err != nil {
-		logger("db.Execute Exec error:" + err.Error())
+		this. logger("db.Execute Exec error:" + err.Error())
 		return nil
 	}
 
 	return result
 }
 
-func Trans() *TxWrapper {
-	link := buildLinkOfMaster()
+func (this *Db) Trans() *TxWrapper {
+	link := this.buildLinkOfMaster()
 	tx, err := link.handler.Begin()
 
 	if err != nil {
-		logger("db.Trans Begin error:" + err.Error())
+		this.logger("db.Trans Begin error:" + err.Error())
 		return nil
 	}
 
-	wrapper := &TxWrapper{
+	return &TxWrapper{
+		db: this,
 		handler:tx,
 	}
+}
 
-	return wrapper
+func (this *Db) Ping() {
+	if this.linkMaster != nil {
+		if this.linkMaster.lifetime < time.Now().Unix() - 7200 {
+			this.linkMaster.handler.Query("SELECT 1")
+			this.linkMaster.lifetime = time.Now().Unix()
+		}
+	}
+
+	for _, link := range this.linkSlaves {
+		if link.lifetime < time.Now().Unix() - 7200 {
+			link.handler.Query("SELECT 1")
+			link.lifetime = time.Now().Unix()
+		}
+	}
+}
+
+func (this *Db) Close() {
+	if this.linkMaster != nil {
+		this.linkMaster.handler.Close()
+	}
+
+	for _, link := range this.linkSlaves {
+		link.handler.Close()
+	}
+}
+
+func init() {
+	sql.Register("mysql", &mysql.MySQLDriver{})
+}
+
+func New(config *Config) *Db {
+	if config.Pool < 5 {
+		config.Pool = 5
+	}
+
+	if config.Active < 1 {
+		config.Active = 1
+	}
+
+	tmp := &Db{config: config, linkSlaves: []*linkWrapper{}}
+
+	tmp.linkMaster = tmp.buildLink(config)
+
+	if config.Deploy {
+		slaves := strings.Split(config.Slave, ",")
+		for _, slave := range slaves {
+			conf := &Config {
+				Host: slave,
+				Port: config.Port,
+				User: config.User,
+				Passwd: config.Passwd,
+				Database: config.Database,
+				Charset: config.Charset,
+				Pool: config.Pool,
+				Active: config.Active,
+				Timeout: config.Timeout,
+			}
+
+			tmp.linkSlaves = append(tmp.linkSlaves, tmp.buildLink(conf))
+		}
+	}
+
+	return tmp
+}
+
+var handler *Db
+
+func Init(config *Config) {
+	handler = New(config)
+}
+
+func FetchRows(tsql string, args ...interface{}) []Row {
+	return handler.FetchRows(tsql, args...)
+}
+
+func FetchFirst(tsql string, args ...interface{}) Row {
+	return handler.FetchFirst(tsql, args...)
+}
+
+func ResultFirst(tsql string, args ...interface{}) interface{} {
+	return handler.ResultFirst(tsql, args...)
+}
+
+func Insert(table string, row Row) int64 {
+	return handler.Insert(table, row)
+}
+
+func InsertBatch(table string, rows []Row) int64 {
+	return handler.InsertBatch(table, rows)
+}
+
+func Update(table string, row Row, condition string, args ...interface{}) int64 {
+	return handler.Update(table, row, condition, args...)
+}
+
+func Delete(table string, condition string, args ...interface{}) int64 {
+	return handler.Delete(table, condition, args...)
+}
+
+func Execute(tsql string, args ...interface{}) sql.Result {
+	return handler.Execute(tsql, args...)
+}
+
+func Trans() *TxWrapper {
+	return handler.Trans()
+}
+
+func Ping() {
+	handler.Ping()
+}
+
+func Close() {
+	handler.Close()
 }
 
 func Table(table string) *Query {
-	return Model(table)
-}
-
-func Model(value interface{}) *Query {
-	query := &Query{}
-	switch value.(type) {
-	case struct{}:
-		query.value = value
-	case string:
-		query.table = value.(string)
-	}
-
+	query := &Query{db:handler}
+	query.table = table
 	return query.init()
 }

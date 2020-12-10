@@ -27,6 +27,7 @@ type collection struct {
 }
 
 type Query struct {
+	db *Db
 	row Row
 	table string
 	alias string
@@ -248,65 +249,38 @@ func (this *Query) Limit(args ...int) *Query {
 func (this *Query) Find() Row {
 	this.Limit(1)
 
-	if this.table == ""{
+	if this.table == "" {
 		return nil
 	}
 
 	options := this.parseExpress()
 	tsql := this.buildSelectSql(options)
 
-	return FetchFirst(tsql, this.bind...)
-}
-
-func (this *Query) First() interface{} {
-	if this.model != nil {
-		this.Find()
-	}
-
-	return this.value
+	return this.db.FetchFirst(tsql, this.bind...)
 }
 
 func (this *Query) Select() []Row {
-	if this.table == ""{
+	if this.table == "" {
 		return []Row{}
 	}
 
 	options := this.parseExpress()
 	tsql := this.buildSelectSql(options)
 
-	return FetchRows(tsql, this.bind...)
-}
-
-func (this *Query) Search() []interface{}{
-	return nil
+	return this.db.FetchRows(tsql, this.bind...)
 }
 
 func (this *Query) Insert(row Row) int64 {
-	return Insert(this.table, row)
+	return this.db.Insert(this.table, row)
 }
 
 func (this *Query) InsertBatch(rows []Row) int64 {
-	return InsertBatch(this.table, rows)
+	return this.db.InsertBatch(this.table, rows)
 }
 
-func (this *Query) Create() int64 {
+func (this *Query) Update(row Row) int64 {
 	if this.table == "" {
 		return 0
-	}
-
-	return this.Insert(this.row)
-}
-
-func (this *Query) Update(args ...Row) int64 {
-	if this.table == ""{
-		return 0
-	}
-
-	var row Row
-	if len(args) == 0 {
-		row = this.row
-	} else {
-		row = args[0]
 	}
 
 	options := this.parseExpress()
@@ -316,7 +290,11 @@ func (this *Query) Update(args ...Row) int64 {
 		where = where[7:]
 	}
 
-	return Update(this.table, row, where)
+	return this.db.Update(this.table, row, where)
+}
+
+func (this *Query) UpdateBatch(rows []Row) int64 {
+	return 0
 }
 
 func (this *Query) Delete() int64 {
@@ -331,11 +309,11 @@ func (this *Query) Delete() int64 {
 		where = where[7:]
 	}
 
-	return Delete(this.table, where)
+	return this.db.Delete(this.table, where)
 }
 
 func (this *Query) Count() int64 {
-	if this.table == ""{
+	if this.table == "" {
 		return 0
 	}
 
@@ -363,8 +341,75 @@ func (this *Query) Min(field string) interface{} {
 	return this.aggregate("MIN", field)
 }
 
-func (this *Query) aggregate(aggregate string, field string) interface{} {
+func (this *Query) First(model interface{}) {
+	this.Limit(1)
+
+	if this.table == "" {
+		return
+	}
+
+	options := this.parseExpress()
+	tsql := this.buildSelectSql(options)
+
+	this.bind = append(this.bind, extractStructFun(model))
+
+	this.db.FetchFirst(tsql, this.bind...)
+}
+
+func (this *Query) Search(models []interface{}) {
 	if this.table == ""{
+		return
+	}
+
+	options := this.parseExpress()
+	tsql := this.buildSelectSql(options)
+
+	this.bind = append(this.bind, extractStructListFun(models))
+
+	this.db.FetchRows(tsql, this.bind...)
+}
+
+func (this *Query) Save(model interface{}) int64 {
+	if this.table == "" || model == nil {
+		return 0
+	}
+
+	tagInfo := extractTagInfo(model)
+	if val, ok := tagInfo["id"]; ok {
+		return this.db.Update(this.table, extractRow(tagInfo), "id = ?", val)
+	}
+
+	return this.db.Insert(this.table, extractRow(tagInfo))
+}
+
+func (this *Query) SaveBatch(models []interface{}) int64 {
+	if this.table == "" || models == nil || len(models) == 0 {
+		return 0
+	}
+
+	tx := this.db.Trans()
+
+	for _, model := range models {
+		tagInfo := extractTagInfo(model)
+
+		if val, ok := tagInfo["id"]; ok {
+			tx.Update(this.table, extractRow(tagInfo), "id = ?", val)
+		} else {
+			tx.Insert(this.table, extractRow(tagInfo))
+		}
+	}
+
+	err := tx.Commit()
+	if err != nil {
+		err = tx.Rollback()
+		return 0
+	}
+
+	return 1
+}
+
+func (this *Query) aggregate(aggregate string, field string) interface{} {
+	if this.table == "" {
 		return 0
 	}
 
@@ -373,7 +418,7 @@ func (this *Query) aggregate(aggregate string, field string) interface{} {
 	options := this.parseExpress()
 	tsql := this.buildSelectSql(options)
 
-	return ResultFirst(tsql, this.bind...)
+	return this.db.ResultFirst(tsql, this.bind...)
 }
 
 func (this *Query) buildSelectSql(options collection) string {

@@ -111,12 +111,10 @@ func SpiExchange(data []byte) {
 	for i := range data {
 		for spiMem[csReg]&txd == 0 {
 		}
-
 		spiMem[fifoReg] = uint32(data[i])
 
 		for spiMem[csReg]&rxd == 0 {
 		}
-
 		data[i] = byte(spiMem[fifoReg])
 	}
 

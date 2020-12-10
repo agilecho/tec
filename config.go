@@ -2,6 +2,7 @@ package tec
 
 import (
 	"github.com/agilecho/tec/cache"
+	"github.com/agilecho/tec/cron"
 	"github.com/agilecho/tec/db"
 	"github.com/agilecho/tec/mongo"
 	"github.com/agilecho/tec/mq"
@@ -275,18 +276,20 @@ type Config struct {
 	Gateway *configOfGateway
 	Extend *configOfExtend
 
+	Redis *cache.Config
+	MySQL *db.Config
+	Mongo *mongo.Config
+	MQ *mq.Config
+	WS *ws.Config
+
+	Cron *cron.Config
+
 	WxApp *ConfigOfWxApp
 	Weixin *ConfigOfWeixin
 	WxOpen *ConfigOfWxOpen
 	WxWork *ConfigOfWxWork
 
 	Tim *ConfigOfTim
-
-	Redis *cache.Config
-	MySQL *db.Config
-	Mongo *mongo.Config
-	MQ *mq.Config
-	WS *ws.Config
 }
 
 func (this *Config) Constant(value string) string {
@@ -335,6 +338,31 @@ func (this *Config) SetTemplate(node map[string]string) {
 
 	for key, value := range node {
 		this.Template.Set(key, this.Constant(value))
+	}
+}
+
+func (this *Config) SetGateway(node map[string]string) {
+	if this.Gateway == nil {
+		this.Gateway = &configOfGateway{}
+	}
+
+	for key, value := range node {
+		this.Gateway.Set(key, this.Constant(value))
+	}
+}
+
+func (this *Config) SetExtend(section string, node map[string]string) {
+	if this.Extend == nil {
+		this.Extend = &configOfExtend{}
+		this.Extend.data = map[string]map[string]string{}
+	}
+
+	if this.Extend.data[section] == nil {
+		this.Extend.data[section] = map[string]string{}
+	}
+
+	for key, value := range node {
+		this.Extend.data[section][key] = this.Constant(value)
 	}
 }
 
@@ -388,13 +416,13 @@ func (this *Config) SetWS(node map[string]string) {
 	}
 }
 
-func (this *Config) SetGateway(node map[string]string) {
-	if this.Gateway == nil {
-		this.Gateway = &configOfGateway{}
+func (this *Config) SetCron(node map[string]string) {
+	if this.Cron == nil {
+		this.Cron = &cron.Config{Schedules: map[string]string{}}
 	}
 
 	for key, value := range node {
-		this.Gateway.Set(key, this.Constant(value))
+		this.Cron.Set(key, this.Constant(value))
 	}
 }
 
@@ -449,21 +477,6 @@ func (this *Config) SetTim(node map[string]string) {
 	}
 }
 
-func (this *Config) SetExtend(section string, node map[string]string) {
-	if this.Extend == nil {
-		this.Extend = &configOfExtend{}
-		this.Extend.data = map[string]map[string]string{}
-	}
-
-	if this.Extend.data[section] == nil {
-		this.Extend.data[section] = map[string]string{}
-	}
-
-	for key, value := range node {
-		this.Extend.data[section][key] = this.Constant(value)
-	}
-}
-
 func (this *Config) Load(path string) {
 	data := Ini(path)
 	if data == nil {
@@ -480,6 +493,8 @@ func (this *Config) Load(path string) {
 			this.SetSession(node)
 		case "template":
 			this.SetTemplate(node)
+		case "gateway":
+			this.SetGateway(node)
 		case "redis":
 			this.SetRedis(node)
 		case "mysql":
@@ -490,8 +505,8 @@ func (this *Config) Load(path string) {
 			this.SetMQ(node)
 		case "ws":
 			this.SetWS(node)
-		case "gateway":
-			this.SetGateway(node)
+		case "cron":
+			this.SetCron(node)
 		case "wxapp":
 			this.SetWxApp(node)
 		case "weixin":

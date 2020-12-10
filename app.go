@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"github.com/agilecho/tec/cache"
+	"github.com/agilecho/tec/cron"
 	"github.com/agilecho/tec/db"
 	"github.com/agilecho/tec/mongo"
+	"github.com/agilecho/tec/mq"
 	"github.com/agilecho/tec/ws"
 	"net/http"
 	"os"
@@ -18,6 +20,7 @@ import (
 )
 
 type Handler func(ctx *Context)
+type StartFunc func(app *App)
 type BeforeFilterFunc func(ctx *Context) bool
 type AfterFilterFunc func(ctx *Context, method string, data interface{})
 
@@ -39,6 +42,9 @@ type App struct {
 	Config *Config
 	Router *Router
 	Debug bool
+
+	startFunc *StartFunc
+	emptyFunc *Handler
 
 	beforeFilter []BeforeFilterFunc
 	afterFilter []AfterFilterFunc
@@ -63,6 +69,14 @@ func (this *App) After(filter AfterFilterFunc) {
 	this.afterFilter = append(this.afterFilter, filter)
 }
 
+func (this *App) Start(fun StartFunc) {
+	this.startFunc = &fun
+}
+
+func (this *App) Empty(fun Handler) {
+	this.emptyFunc = &fun
+}
+
 func (this *App) Bind(event string, callback interface{}) {
 	this.events[event] = callback
 }
@@ -84,7 +98,7 @@ func (this *App) init() {
 		db.Init(this.Config.MySQL)
 
 		go func() {
-			pring := time.NewTicker(2 * time.Second)
+			pring := time.NewTicker(3600 * time.Second)
 			for {
 				select {
 				case <- pring.C:
@@ -98,20 +112,25 @@ func (this *App) init() {
 		mongo.Init(this.Config.Mongo)
 	}
 
+	if this.Config.MQ != nil {
+		mq.Init(this.Config.MQ)
+	}
+
+	if this.Config.Cron != nil {
+		this.Config.Cron.Log = LOG_PATH + "/cron.txt"
+		cron.Init(this.Config.Cron)
+	}
+
 	if this.Config.Session != nil {
 		sessionStart()
 	}
 
-	if fun, ok := this.events["router"]; ok {
-		fun.(func(router *Router))(this.Router)
+	if this.startFunc != nil {
+		(*this.startFunc)(this)
 	}
 
-	if fun, ok := this.events["start"]; ok {
-		fun.(func(app *App))(this)
-	}
-
-	if _, ok := this.events["empty"]; !ok {
-		this.events["empty"] = Handler(func(ctx *Context) {
+	if this.emptyFunc == nil {
+		this.Empty(func(ctx *Context) {
 			ctx.Json(Result{Code: 404, Msg: "can not find handler path:" + ctx.Path + " method:" + ctx.Method})
 		})
 	}
@@ -157,7 +176,7 @@ func (this *App) Handler(rep http.ResponseWriter, req *http.Request) {
 
 	handler := this.Router.find(path, req.Method)
 	if handler == nil {
-		this.events["empty"].(Handler)(context)
+		(*this.emptyFunc)(context)
 	} else {
 		handler(context)
 	}
@@ -178,7 +197,7 @@ func (this *App) Run() {
 		http.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir(this.Config.App.Static))))
 	}
 
-	Logger("app: " + this.Config.App.Host + ":" + strconv.Itoa(this.Config.App.Port), "tec", "false")
+	fmt.Println("app: " + this.Config.App.Host + ":" + strconv.Itoa(this.Config.App.Port))
 
 	this.srv = http.Server{Addr:this.Config.App.Host + ":" + strconv.Itoa(this.Config.App.Port)}
 
@@ -221,7 +240,7 @@ func (this *App) RunWS() {
 	http.Handle(this.Config.WS.Path, &this.ws)
 	http.HandleFunc(this.Config.WS.Path + "/push", this.ws.HandlePUSH)
 
-	Logger("app: " + this.Config.WS.Host + ":" + strconv.Itoa(this.Config.WS.Port), "tec", "false")
+	fmt.Println("app: " + this.Config.WS.Host + ":" + strconv.Itoa(this.Config.WS.Port))
 
 	this.srv = http.Server{Addr:this.Config.WS.Host + ":" + strconv.Itoa(this.Config.WS.Port)}
 
@@ -288,6 +307,14 @@ func (this *App) Close(sign os.Signal) {
 		mongo.Close()
 	}
 
+	if this.Config.MQ != nil {
+		mq.Close()
+	}
+
+	if this.Config.Cron != nil {
+		cron.Stop()
+	}
+
 	if this.Config.Session != nil {
 		sessionGC()
 	}
@@ -301,7 +328,7 @@ func (this *App) Close(sign os.Signal) {
 		Logger("app.server shutdown error:" + err.Error(), "error", "false")
 	}
 
-	Logger("app close of " + sign.String(), "tec", "false")
+	fmt.Println("app close of " + sign.String())
 }
 
 func gatewayRequest(config *Config, state int) {
@@ -361,6 +388,14 @@ func Cli(callback func()) {
 			mongo.Close()
 		}
 
+		if CONFIG.MQ != nil {
+			mq.Close()
+		}
+
+		if CONFIG.Cron != nil {
+			cron.Stop()
+		}
+
 		return
 	}
 
@@ -383,10 +418,19 @@ func Cli(callback func()) {
 		mongo.Init(config.Mongo)
 	}
 
+	if config.MQ != nil {
+		mq.Init(config.MQ)
+	}
+
+	if config.Cron != nil {
+		config.Cron.Log = LOG_PATH + "/cron.txt"
+		cron.Init(config.Cron)
+	}
+
 	CONFIG = config
 
-	Logger("ROOT_PATH:" + ROOT_PATH + " HOST_NAME:" + HOST_NAME, "tec", "false")
-	Logger("cli run", "tec", "false")
+	fmt.Println("ROOT_PATH:" + ROOT_PATH + " HOST_NAME:" + HOST_NAME)
+	fmt.Println("cli run")
 
 	callback()
 }
@@ -394,7 +438,7 @@ func Cli(callback func()) {
 func Notify() {
 	if CONFIG.MySQL != nil {
 		go func() {
-			pring := time.NewTicker(10 * time.Second)
+			pring := time.NewTicker(3600 * time.Second)
 			for {
 				select {
 				case <- pring.C:
@@ -412,7 +456,7 @@ func Notify() {
 
 	go func() {
 		sign := <-channel
-		fmt.Println("cli close of " + sign.String(), "tec", "false")
+		fmt.Println("cli close of " + sign.String())
 		Cli(nil)
 		signWG.Done()
 	}()

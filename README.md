@@ -1,15 +1,17 @@
 ##1.第三方库
 原库已集成至代码库，无须重新安装，部分代码已精简  
 更新至2020-11-01  
+github.com/robfig/cron.git  
 github.com/streadway/amqp.git  
 github.com/beanstalkd/go-beanstalk.git  
-github.com/go-mgo/mgo.git 
+github.com/go-mgo/mgo.git  
 github.com/go-sql-driver/mysql.git   
 github.com/gomodule/redigo.git  
 github.com/gorilla/websocket.git  
+github.com/stianeikeland/go-rpio.git
 
 ##2、安装
-go get github.com/agilecho/tec
+go get -u github.com/agilecho/tec
 
 ##3、项目
 创建项目文件夹，例如demo，目录结构如下：
@@ -18,7 +20,11 @@ demo
     config
         dev.ini
     src
-        源代码位置
+        源代码文件
+    static
+        静态资源文件
+    tpl
+        模板文件
     demo.go
 </pre>
 
@@ -46,7 +52,7 @@ passwd =
 prefix =
 pool = 5
 active = 1
-logs = ROOT_PATH/logs/redis
+logs = LOG_PATH/redis
 
 [cookie]
 domain = demo.com
@@ -79,7 +85,7 @@ pool = 5
 active = 1
 timeout = 120
 debug = true
-logs = ROOT_PATH/logs/mysql
+logs = LOG_PATH/mysql
 
 [mongo]
 host = 127.0.0.1
@@ -88,28 +94,31 @@ user = root
 passwd =
 database = admin
 pool = 5
-logs = ROOT_PATH/logs/mongo
+logs = LOG_PATH/mongo
 
 [mq]
-type = rabbit
 host = 127.0.0.1
 port = 5672
 user = guest
 passwd = guest
 vhost = /
 exchange = exchange
-logs = ROOT_PATH/logs/mq
+logs = LOG_PATH/mq
+
+[cron]
+test = */5 * * * * ?
+
 </pre>
 
 项目中不使用，则删除节点  
-
-demo.go示例如下：  
+ 
 *WEB方式*  
 <pre>
 package main
 
 import (
     "github.com/agilecho/tec"
+    "github.com/agilecho/tec/cron"
 )
 
 func main() {
@@ -119,6 +128,25 @@ func main() {
         ctx.Text("hello world.")
     })
 
+    app.Start(func(app *tec.App) {
+        cron.Add(app.Config.Cron.Schedules["test"], func() {
+            fmt.Println(tec.Microtime())
+        }).Start()
+    })
+
+    app.Empty(func(ctx *tec.Context){
+        ctx.Text("not find")
+    })
+
+    app.Before(func(ctx *tec.Context) bool {
+        fmt.Println("handler filter")
+        return true
+    })
+
+    app.After(func(ctx *tec.Context, method string, data interface{}) {
+        fmt.Println("context response")
+    })
+    
     app.Run()
 }
 </pre>
@@ -176,10 +204,134 @@ func main() {
 }
 </pre>
 
-##4、部署
-1.生成可执行文件go build demo.go  
-2.将demo和资源文件夹复制到Linux服务器  
+##4、工具类
+###4.1.数据库
+默认MySQL，支持主从库
+<pre>
+// 添加记录
+insertid := db.Insert("表名", db.Row{"字段名":"字段值", ...})
+// 更新记录
+affected := db.Update("SQL语句", db.Row{"字段名":"字段值", ...}, "WHERE条件", ...参数)
+// 删除记录
+affected := db.DELETE("表名", "WHERE条件", ...参数)
+// 获取单条记录
+row := db.FetchFirst("SQL语句", ...参数)
+// 获取多条记录
+rows := db.FetchRows("SQL语句", ...参数)
+
+// 事务
+tx := db.Trans()
+tx.Insert(...)
+tx.Update(...)
+err := tx.Commit()
+if err != nil {
+    tx.Rollback()
+}
+
+// 查询
+db.Table("表名").Insert(db.Row{})
+db.Table("表名").Where("id", "=", 1).Update(db.Row{})
+db.Table("表名").Where("id", "=", 1).Delete()
+db.Table("表名").Where("id", "=", 1).Find()
+db.Table("表名").Alias("a").Join("xxx", "").Where("id", ">", 1).Select()
+
+Where方法
+
+结构体
+user := User{name:""}
+users := []*User{}
+db.Table("表名").Save(&user)
+db.Table("表名").Where().One(&user)
+db.Table("表名").Where().Search(users)
+</pre>
+
+###4.2.缓存
+默认使用Redis
+<pre>
+cache.常用方法,如Get、Set、SetNx
+</pre>
+
+###4.3.Mongodb 
+<pre>
+mongo.ListDBs()
+mongo.ListCollections("库名")
+mongo.CreateCollection("集合名")
+mongo.DropCollection("集合名")
+mongo.SelectCollection("库名", "集合名")
+
+集合方法
+Insert()
+Update()
+Remove()
+One()
+Find()
+</pre>
+
+###4.4.消息队列 
+默认使用RabbitMQ
+<pre>
+// 发送
+mq.DirectQueue("demo").Put("hello world.")
+
+// 消费
+go mq.DirectQueue("demo").Reserve(func(queue *mq.Queue, message *mq.Message) {
+    fmt.Println(message.Body)
+    queue.Delete(message)
+})
+</pre>
+
+###4.5.图片 
+<pre>
+// 验证码
+captcha := image.NewCaptcha(tec.Random(), 100, 10)
+captcha.PNG()
+
+// 图片处理
+img := image.New("图片路径")
+img.Circle(image.Option{Width:100, Height:100, image.Center, Target:"保存路径"})
+img.Merge("图片路径", image.Option{})
+img.Text("图片路径", image.Option{})
+img.Thumb("图片路径", image.Option{})
+
+img.Save()
+</pre>
+
+###4.6.Rpio 
+<pre>
+err := rpio.Open()
+
+pin := rpio.Pin(10)
+
+pin.Output()
+pin.High()
+pin.Low()
+pin.Toggle()
+
+pin.Input()
+res := pin.Read()
+
+pin.Mode(rpio.Output)
+pin.Write(rpio.High)
+pin.PullUp()
+pin.PullDown()
+pin.PullOff()
+
+pin.Pull(rpio.PullUp)
+
+rpio.Close()
+</pre>
+
+##5、部署
+1.编译 go build demo.go  
+2.打包 ./demo -zip  
+2.将demo.zip部署到服务器  
 3.进入服务器目录中执行  
-<code>
-./demo / prod > demo.log &
-</code>
+<pre>
+unzip -l demo.zip
+
+使用本机hostname配置文件ini
+./demo >demo.log 2>&1 &
+
+使用prod配置文件ini
+./demo prod >demo.log 2>&1 &
+</pre>

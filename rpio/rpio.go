@@ -3,6 +3,7 @@ package rpio
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"os"
 	"reflect"
 	"sync"
@@ -24,7 +25,15 @@ const (
 	pwmOffset   = 0x20C000
 	spiOffset   = 0x204000
 	intrOffset  = 0x00B000
+
 	memLength = 4096
+)
+
+const (
+	GPPUPPDN0 = 57
+	GPPUPPDN1 = 58
+	GPPUPPDN2 = 59
+	GPPUPPDN3 = 60
 )
 
 var (
@@ -52,6 +61,12 @@ const (
 	Clock
 	Pwm
 	Spi
+	Alt0
+	Alt1
+	Alt2
+	Alt3
+	Alt4
+	Alt5
 )
 
 const (
@@ -63,6 +78,7 @@ const (
 	PullOff Pull = iota
 	PullDown
 	PullUp
+	PullNone
 )
 
 const (
@@ -150,6 +166,25 @@ func (pin Pin) PullOff() {
 	PullMode(pin, PullOff)
 }
 
+func (pin Pin) ReadPull() Pull {
+	if !isBCM2711() {
+		return PullNone
+	}
+
+	reg := GPPUPPDN0 + (uint8(pin) >> 4)
+	bits := gpioMem[reg] >> ((uint8(pin) & 0xf) << 1) & 0x3
+	switch bits {
+	case 0:
+		return PullOff
+	case 1:
+		return PullUp
+	case 2:
+		return PullDown
+	default:
+		return PullNone
+	}
+}
+
 func (pin Pin) Detect(edge Edge) {
 	DetectEdge(pin, edge)
 }
@@ -163,11 +198,14 @@ func PinMode(pin Pin, mode Mode) {
 	shift := (uint8(pin) % 10) * 3
 	f := uint32(0)
 
-	const in = 0   // 000
-	const out = 1  // 001
-	const alt0 = 4 // 100
-	const alt4 = 3 // 011
-	const alt5 = 2 // 010
+	const in = 0
+	const out = 1
+	const alt0 = 4
+	const alt1 = 5
+	const alt2 = 6
+	const alt3 = 7
+	const alt4 = 3
+	const alt5 = 2
 
 	switch mode {
 	case Input:
@@ -205,6 +243,18 @@ func PinMode(pin Pin, mode Mode) {
 		default:
 			return
 		}
+	case Alt0:
+		f = alt0
+	case Alt1:
+		f = alt1
+	case Alt2:
+		f = alt2
+	case Alt3:
+		f = alt3
+	case Alt4:
+		f = alt4
+	case Alt5:
+		f = alt5
 	}
 
 	memlock.Lock()
@@ -275,7 +325,7 @@ func DetectEdge(pin Pin, edge Edge) {
 
 	if edge&RiseEdge > 0 {
 		gpioMem[renReg] |= bit
-	} else { // clear bit
+	} else {
 		gpioMem[renReg] &^= bit
 	}
 	if edge&FallEdge > 0 {
@@ -298,29 +348,49 @@ func EdgeDetected(pin Pin) bool {
 }
 
 func PullMode(pin Pin, pull Pull) {
-	pullClkReg := pin/32 + 38
-	pullReg := 37
-	shift := pin % 32
-
 	memlock.Lock()
 	defer memlock.Unlock()
 
-	switch pull {
-	case PullDown, PullUp:
-		gpioMem[pullReg] |= uint32(pull)
-	case PullOff:
+	if isBCM2711() {
+		pullreg := GPPUPPDN0 + (pin >> 4)
+		pullshift := (pin & 0xf) << 1
+
+		var p uint32
+
+		switch pull {
+		case PullOff:
+			p = 0
+		case PullUp:
+			p = 1
+		case PullDown:
+			p = 2;
+		}
+
+		pullbits := gpioMem[pullreg]
+		pullbits &= ^(3 << pullshift)
+		pullbits |= (p << pullshift)
+		gpioMem[pullreg]= pullbits
+	} else {
+		pullClkReg := pin/32 + 38
+		pullReg := 37
+		shift := pin % 32
+
+		switch pull {
+		case PullDown, PullUp:
+			gpioMem[pullReg] |= uint32(pull)
+		case PullOff:
+			gpioMem[pullReg] &^= 3
+		}
+
+		time.Sleep(time.Microsecond)
+
+		gpioMem[pullClkReg] = 1 << shift
+
+		time.Sleep(time.Microsecond)
+
 		gpioMem[pullReg] &^= 3
+		gpioMem[pullClkReg] = 0
 	}
-
-	time.Sleep(time.Microsecond)
-
-	gpioMem[pullClkReg] = 1 << shift
-
-	time.Sleep(time.Microsecond)
-
-	gpioMem[pullReg] &^= 3
-	gpioMem[pullClkReg] = 0
-
 }
 
 func SetFreq(pin Pin, freq int) {
@@ -336,13 +406,13 @@ func SetFreq(pin Pin, freq int) {
 	clkCtlReg := 28
 	clkDivReg := 28
 	switch pin {
-	case 4, 20, 32, 34: // clk0
+	case 4, 20, 32, 34:
 		clkCtlReg += 0
 		clkDivReg += 1
-	case 5, 21, 42, 44: // clk1
+	case 5, 21, 42, 44:
 		clkCtlReg += 2
 		clkDivReg += 3
-	case 6, 43: // clk2
+	case 6, 43:
 		clkCtlReg += 4
 		clkDivReg += 5
 	case 12, 13, 40, 41, 45, 18, 19:
@@ -451,11 +521,9 @@ func Open() (err error) {
 	if os.IsPermission(err) {
 		file, err = os.OpenFile("/dev/gpiomem", os.O_RDWR|os.O_SYNC, 0)
 	}
-
 	if err != nil {
 		return
 	}
-
 	defer file.Close()
 
 	memlock.Lock()
@@ -499,7 +567,6 @@ func memMap(fd uintptr, base int64) (mem []uint32, mem8 []byte, err error) {
 		syscall.PROT_READ|syscall.PROT_WRITE,
 		syscall.MAP_SHARED,
 	)
-
 	if err != nil {
 		return
 	}
@@ -524,23 +591,44 @@ func Close() error {
 	return nil
 }
 
-func getBase() (base int64) {
-	base = bcm2835Base
+func readBase(offset int64) (int64, error) {
 	ranges, err := os.Open("/proc/device-tree/soc/ranges")
 	defer ranges.Close()
 	if err != nil {
-		return
+		return 0, err
 	}
 	b := make([]byte, 4)
-	n, err := ranges.ReadAt(b, 4)
+	n, err := ranges.ReadAt(b, offset)
 	if n != 4 || err != nil {
-		return
+		return 0, err
 	}
 	buf := bytes.NewReader(b)
 	var out uint32
 	err = binary.Read(buf, binary.BigEndian, &out)
 	if err != nil {
-		return
+		return 0, err
 	}
-	return int64(out)
+
+	if out == 0 {
+		return 0, errors.New("rpio: GPIO base address not found")
+	}
+	return int64(out), nil
+}
+
+func getBase() int64 {
+	b, err := readBase(4)
+	if err == nil {
+		return b
+	}
+
+	b, err = readBase(8)
+	if err == nil {
+		return b
+	}
+
+	return int64(bcm2835Base)
+}
+
+func isBCM2711() bool {
+	return gpioMem[GPPUPPDN3] != 0x6770696f
 }

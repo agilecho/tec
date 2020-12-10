@@ -19,15 +19,15 @@ var (
 )
 
 type conn struct {
-	mu      sync.Mutex
+	mu sync.Mutex
 	pending int
-	err     error
-	conn    net.Conn
+	err error
+	conn net.Conn
 
 	readTimeout time.Duration
-	br          *bufio.Reader
+	br *bufio.Reader
 	writeTimeout time.Duration
-	bw           *bufio.Writer
+	bw *bufio.Writer
 	lenScratch [32]byte
 	numScratch [40]byte
 }
@@ -37,17 +37,17 @@ type DialOption struct {
 }
 
 type dialOptions struct {
-	readTimeout  time.Duration
+	readTimeout time.Duration
 	writeTimeout time.Duration
-	dialer       *net.Dialer
-	dialContext  func(ctx context.Context, network, addr string) (net.Conn, error)
-	db           int
-	username     string
-	password     string
-	clientName   string
-	useTLS       bool
-	skipVerify   bool
-	tlsConfig    *tls.Config
+	dialer *net.Dialer
+	dialContext func(ctx context.Context, network, addr string) (net.Conn, error)
+	db int
+	username string
+	password string
+	clientName string
+	useTLS bool
+	skipVerify bool
+	tlsConfig *tls.Config
 }
 
 func DialReadTimeout(d time.Duration) DialOption {
@@ -178,10 +178,10 @@ func DialContext(ctx context.Context, network, address string, options ...DialOp
 	}
 
 	c := &conn{
-		conn:         netConn,
-		bw:           bufio.NewWriter(netConn),
-		br:           bufio.NewReader(netConn),
-		readTimeout:  do.readTimeout,
+		conn: netConn,
+		bw: bufio.NewWriter(netConn),
+		br: bufio.NewReader(netConn),
+		readTimeout: do.readTimeout,
 		writeTimeout: do.writeTimeout,
 	}
 

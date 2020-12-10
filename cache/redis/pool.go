@@ -288,8 +288,6 @@ func (ac *activeConn) Close() error {
 	if ac.state&connectionSubscribeState != 0 {
 		pc.c.Send("UNSUBSCRIBE")
 		pc.c.Send("PUNSUBSCRIBE")
-		// To detect the end of the message stream, ask the server to echo
-		// a sentinel value and read until we see that value.
 		sentinelOnce.Do(initSentinel)
 		pc.c.Send("ECHO", sentinel)
 		pc.c.Flush()

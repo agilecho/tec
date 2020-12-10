@@ -873,7 +873,7 @@ func Ini(path string) map[string]map[string]string {
 	return data
 }
 
-var loggerRWMutex = &sync.RWMutex{}
+var loggerRWMutex sync.RWMutex
 
 func Logger(args ...string) {
 	if len(args) == 0 {
@@ -892,13 +892,7 @@ func Logger(args ...string) {
 	}
 
 	var text = strings.Builder{}
-
-	text.WriteString(time.Now().Format("2006-01-02 15:04:05"))
-	text.WriteString("(")
-	text.WriteString(Microtime())
-	text.WriteString(") ")
-	text.WriteString(data)
-	text.WriteString("\r\n")
+	text.WriteString(fmt.Sprintf("%v%v%v%v%v%v", time.Now().Format("2006-01-02 15:04:05"), "(", Microtime(), ") ", data, "\r\n"))
 
 	go func(data string, path, dir string, isDir bool) {
 		loggerRWMutex.Lock()
@@ -911,7 +905,7 @@ func Logger(args ...string) {
 		paths.WriteString(path)
 		paths.WriteString("/debug")
 
-		fileName := "/" + strconv.Itoa(now.Hour()) + ".txt"
+		fileName := "/" + now.Format("2006010215") + ".txt"
 
 		if isDir {
 			if dir != "" {
@@ -920,7 +914,7 @@ func Logger(args ...string) {
 			}
 
 			paths.WriteString("/")
-			paths.WriteString(now.Format("20060102"))
+			paths.WriteString(now.Format("200601"))
 		} else {
 			fileName = "/" + dir + ".txt"
 		}
@@ -1037,7 +1031,7 @@ func Http(uri string, params interface{}, header map[string]string, args ...inte
 	}
 
 	if CONFIG.App != nil && CONFIG.App.Debug {
-		Logger("Http Uri:" + uri + " method:" + method + " header:" + JsonEncode(request.Header), "tec")
+		Logger("Http Uri:" + uri + " method:" + method + " header:" + JsonEncode(request.Header), "http")
 	}
 
 	response, err := client.Do(request)
@@ -1052,7 +1046,7 @@ func Http(uri string, params interface{}, header map[string]string, args ...inte
 		}
 
 		if CONFIG.App != nil && CONFIG.App.Debug {
-			Logger("Http Do Error " + error, "tec")
+			Logger("Http Do Error " + error, "http")
 		}
 
 		return &Response{Status:502, Body: "Server Error"}
@@ -1073,7 +1067,7 @@ func Http(uri string, params interface{}, header map[string]string, args ...inte
 	}
 
 	if CONFIG.App != nil && CONFIG.App.Debug {
-		Logger("Reponse:" + result.Body, "tec")
+		Logger("Reponse:" + result.Body, "http")
 	}
 
 	return &result
@@ -1171,23 +1165,24 @@ func init() {
 		ROOT_PATH = path.Dir(os.Args[0])
 	}
 
-	if len(os.Args) > 1 {
-		if os.Args[1][0] != '/' {
-			os.Args[1] = "/" + os.Args[1]
-		}
-
-		ROOT_PATH += os.Args[1]
-	}
-
 	APP_PATH = ROOT_PATH + "/app"
 	PUBLIC_PATH = ROOT_PATH + "/public"
 	STATIC_PATH = ROOT_PATH + "/static"
 	LOG_PATH = ROOT_PATH + "/logs"
 
 	HOST_NAME = GetHostName()
-	if len(os.Args) > 2 {
-		HOST_NAME = os.Args[2]
+	if len(os.Args) > 1 {
+		if os.Args[1] == "-zip" {
+			zipProject()
+			return
+		}
+
+		HOST_NAME = os.Args[1]
 	}
+}
+
+func zipProject() {
+
 }
 
 func Exception(msgs ...string) {

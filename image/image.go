@@ -64,13 +64,9 @@ type Image struct {
 	nrgba *image.NRGBA
 }
 
-func (this *Image) Circle(option *Option) bool {
-	width := 0
+func (this *Image) Circle(option Option) bool {
 	ty := Center
-
-	if option != nil {
-		width = option.Width
-	}
+	width := option.Width
 
 	tmp := Fill(this.image, width, width, ty, Lanczos)
 	if tmp == nil {
@@ -103,7 +99,7 @@ func (this *Image) makeCircleNRGBA(width int, tmp *image.NRGBA) *image.NRGBA {
 	return nrgba
 }
 
-func (this *Image) Merge(source string, option *Option) bool {
+func (this *Image) Merge(source string, option Option) bool {
 	file, err := os.Open(source)
 	if err != nil {
 		return false
@@ -119,20 +115,18 @@ func (this *Image) Merge(source string, option *Option) bool {
 	X := 0
 	Y := 0
 
-	if option != nil {
-		X = option.X
-		Y = option.Y
+	X = option.X
+	Y = option.Y
 
-		if option.Width > 0 {
-			if option.Circle {
-				tmp = this.makeCircleNRGBA(option.Width, Fill(tmp, option.Width, option.Width, Center, Lanczos))
-			} else {
-				tmp = Fill(tmp, option.Width, option.Height, Center, Lanczos)
-			}
+	if option.Width > 0 {
+		if option.Circle {
+			tmp = this.makeCircleNRGBA(option.Width, Fill(tmp, option.Width, option.Width, Center, Lanczos))
+		} else {
+			tmp = Fill(tmp, option.Width, option.Height, Center, Lanczos)
+		}
 
-			if tmp == nil {
-				return false
-			}
+		if tmp == nil {
+			return false
 		}
 	}
 
@@ -140,8 +134,8 @@ func (this *Image) Merge(source string, option *Option) bool {
 	return true
 }
 
-func (this *Image) Text(data string, option *Option) bool {
-	if option == nil || option.Font == "" {
+func (this *Image) Text(data string, option Option) bool {
+	if option.Font == "" {
 		return false
 	}
 
@@ -175,16 +169,10 @@ func (this *Image) Text(data string, option *Option) bool {
 	return true
 }
 
-func (this *Image) Thumb(option *Option) bool {
-	width := 0
-	height := 0
-	ty := Center
-
-	if option != nil {
-		width = option.Width
-		height = option.Height
-		ty = option.Type
-	}
+func (this *Image) Thumb(option Option) bool {
+	width := option.Width
+	height := option.Height
+	ty := option.Type
 
 	this.nrgba = Fill(this.image, width, height, ty, Lanczos)
 	if this.nrgba == nil {
@@ -233,16 +221,8 @@ func (this *Image) Save(args ...string) bool {
 	return true
 }
 
-func New(path string, args ...int) *Image {
+func New(path string) *Image {
 	img := Image{Backgroud:path}
-
-	if len(args) == 2 {
-		img.Width = args[0]
-		img.Height = args[1]
-	} else if len(args) == 1 {
-		img.Width = args[0]
-		img.Height = args[1]
-	}
 
 	if path != "" {
 		file, err := os.Open(path)

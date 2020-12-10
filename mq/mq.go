@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"github.com/agilecho/tec/mq/amqp"
-	"github.com/agilecho/tec/mq/beanstalk"
 	"io"
 	"os"
 	"strconv"
@@ -16,8 +15,15 @@ import (
 	"time"
 )
 
+type Message struct {
+	delivery amqp.Delivery
+	Id string
+	Body string
+}
+
+type ReserveMessageFunc func(queue *Queue, message *Message)
+
 type Config struct {
-	Type string
 	Host string
 	Port string
 	User string
@@ -30,8 +36,6 @@ type Config struct {
 
 func (this *Config) Set(key string, value string) {
 	switch strings.ToLower(key) {
-	case "type":
-		this.Type = value
 	case "host":
 		this.Host = value
 	case "port":
@@ -51,176 +55,13 @@ func (this *Config) Set(key string, value string) {
 	}
 }
 
-type Message struct {
-	delivery amqp.Delivery
-	Id string
-	Body string
-}
-
-type ReserveMessageFunc func(handle MQ, msg *Message)
-
-type MQ interface {
-	Connect()
-	Close()
-	UseTube(tube string)
-	FanoutTube(tube string)
-	Put(data string, level uint32, delay time.Duration) interface{}
-	Watch(tube string)
-	Reserve(fun ReserveMessageFunc)
-	Delete(message *Message) bool
-}
-
-var rwMu = &sync.RWMutex{}
-
-type logger struct {
-	config *Config
-}
-
-func (this *logger) log(message string) {
-	if this.config == nil {
-		return
-	}
-
-	now := time.Now()
-
-	var text = strings.Builder{}
-
-	text.WriteString(now.Format("2006-01-02 15:01:01"))
-	text.WriteString("(")
-	text.WriteString(strconv.FormatFloat(float64(now.UnixNano() / 1e6) * 0.0001, 'f', 4, 64))
-	text.WriteString(") ")
-	text.WriteString(message)
-	text.WriteString("\r\n")
-
-	if this.config.Debug  {
-		fmt.Print(text.String())
-	}
-
-	go func(data string, config *Config) {
-		rwMu.Lock()
-		defer rwMu.Unlock()
-
-		err := os.MkdirAll(config.Logs + "/" + time.Now().Format("20060102"), os.ModePerm)
-		if err != nil {
-			return
-		}
-
-		file, _ := os.OpenFile(config.Logs + "/" + time.Now().Format("20060102") + "/" + strconv.Itoa(time.Now().Hour()) + ".txt", os.O_RDWR | os.O_CREATE | os.O_APPEND, 0666)
-		defer file.Close()
-
-		_, err = file.WriteString(data)
-	}(text.String(), this.config)
-}
-
-type rabbitMQ struct {
-	logger
-	handle *amqp.Connection
-	channel *amqp.Channel
+type Queue struct {
+	rabbitmq *RabbitMQ
 	queue amqp.Queue
-	exchange string
-	tube string
+	name string
 }
 
-func (this *rabbitMQ) Connect() {
-	var err error
-	this.handle, err = amqp.Dial("amqp://" + this.config.User + ":" + this.config.Passwd + "@" + this.config.Host + ":" + this.config.Port + "/")
-	if err != nil {
-		this.log("mq.rabbitMQ.Connect error:" + err.Error())
-	}
-}
-
-func (this *rabbitMQ) Close() {
-	if this.handle == nil {
-		return
-	}
-
-	if !this.handle.IsClosed() {
-		this.handle.Close()
-		this.channel.Close()
-	}
-}
-
-func (this *rabbitMQ) UseTube(tube string) {
-	if this.handle == nil {
-		return
-	}
-
-	this.tube = tube
-	this.exchange = this.config.Exchange
-
-	var err error
-	this.channel, err = this.handle.Channel()
-	if err != nil {
-		this.log("mq.rabbitMQ.UseTube.Channel error:" + err.Error())
-		return
-	}
-
-	err = this.channel.ExchangeDeclare(this.exchange, amqp.ExchangeDirect, true, false, false, false, nil)
-	if err != nil {
-		this.log("mq.rabbitMQ.UseTube.ExchangeDeclare error:" + err.Error())
-	}
-}
-
-func (this *rabbitMQ) FanoutTube(tube string) {
-	if this.handle == nil {
-		return
-	}
-
-	this.tube = tube
-	this.exchange = this.config.Exchange + ".fanout"
-
-	var err error
-	this.channel, err = this.handle.Channel()
-	if err != nil {
-		this.log("mq.rabbitMQ.FanoutTube.Channel error:" + err.Error())
-		return
-	}
-
-	err = this.channel.ExchangeDeclare(this.exchange, amqp.ExchangeFanout, true, false, false, false, nil)
-	if err != nil {
-		this.log("mq.rabbitMQ.FanoutTube.ExchangeDeclare error:" + err.Error())
-	}
-}
-
-func (this *rabbitMQ) Watch(tube string) {
-	if this.channel == nil {
-		return
-	}
-
-	var err error
-	this.queue, err = this.channel.QueueDeclare(this.exchange + "." + this.tube, true, false, false, false, nil)
-	if err != nil {
-		this.log("mq.rabbitMQ.Watch.QueueDeclare error:" + err.Error())
-		return
-	}
-
-	err = this.channel.QueueBind(this.exchange + "." + this.tube, this.tube, this.exchange, true, nil)
-	if err != nil {
-		this.log("mq.rabbitMQ.Watch.QueueBind error:" + err.Error())
-		return
-	}
-}
-
-func (this *rabbitMQ) Put(data string, level uint32, delay time.Duration) interface{} {
-	if this.channel == nil {
-		return false
-	}
-
-	err := this.channel.Publish(this.exchange, this.tube, false, false, amqp.Publishing {
-		ContentType: "text/plain",
-		MessageId: this.UUID(),
-		Body: []byte(data),
-	})
-
-	if err != nil {
-		this.log("mq.rabbitMQ.Put error:" + err.Error())
-		return false
-	}
-
-	return true
-}
-
-func (this *rabbitMQ) UUID() string {
+func (this *Queue) uuid() string {
 	bytes := make([]byte, 48)
 	io.ReadFull(rand.Reader, bytes)
 
@@ -230,14 +71,33 @@ func (this *rabbitMQ) UUID() string {
 	return hex.EncodeToString(instance.Sum(nil))
 }
 
-func (this *rabbitMQ) Reserve(fun ReserveMessageFunc) {
-	if this.channel == nil {
+func (this *Queue) Put(data string) interface{} {
+	if this.rabbitmq.channel == nil || this.queue.Name == "" {
+		return false
+	}
+
+	err := this.rabbitmq.channel.Publish(this.rabbitmq.config.Exchange, this.name, false, false, amqp.Publishing {
+		ContentType: "text/plain",
+		MessageId: this.uuid(),
+		Body: []byte(data),
+	})
+
+	if err != nil {
+		this.rabbitmq.logger("mq.Put error:" + err.Error())
+		return false
+	}
+
+	return true
+}
+
+func (this *Queue) Reserve(fun ReserveMessageFunc) {
+	if this.rabbitmq.channel == nil || this.queue.Name == "" {
 		return
 	}
 
-	deliveries, err := this.channel.Consume(this.queue.Name, "", false, false, false, true, nil)
+	deliveries, err := this.rabbitmq.channel.Consume(this.queue.Name, "", false, false, false, true, nil)
 	if err != nil {
-		this.log("mq.rabbitMQ.Reserve error:" + err.Error())
+		this.rabbitmq.logger("mq.Reserve error:" + err.Error())
 		return
 	}
 
@@ -250,108 +110,168 @@ func (this *rabbitMQ) Reserve(fun ReserveMessageFunc) {
 	}
 }
 
-func (this *rabbitMQ) Delete(message *Message) bool {
+func (this *Queue) Delete(message *Message) bool {
 	err := message.delivery.Ack(true)
 	if err != nil {
-		this.log("mq.rabbitMQ.Delete error:" + err.Error())
+		this.rabbitmq.logger("mq.Delete error:" + err.Error())
 		return false
 	}
 
 	return true
 }
 
-type beanstalkd struct {
-	logger
-	handle *beanstalk.Conn
+type RabbitMQ struct {
+	config *Config
+	handle *amqp.Connection
+	channel *amqp.Channel
+	queues []*Queue
+	mu sync.RWMutex
 }
 
-func (this *beanstalkd) Connect() {
+func (this *RabbitMQ) microtime() string {
+	return strconv.FormatFloat(float64(time.Now().UnixNano() / 1e6) * 0.001, 'f', 4, 64)
+}
+
+func (this *RabbitMQ) logger(message string) {
+	if this.config == nil {
+		return
+	}
+
+	now := time.Now()
+
+	var text = strings.Builder{}
+	text.WriteString(fmt.Sprintf("%v%v%v%v%v%v", now.Format("2006-01-02 15:04:05"), "(", this.microtime(), ") ", message, "\r\n"))
+
+	if this.config.Debug  {
+		fmt.Print(text.String())
+	}
+
+	go func(data string, that *RabbitMQ) {
+		that.mu.Lock()
+		defer that.mu.Unlock()
+
+		err := os.MkdirAll(that.config.Logs + "/" + time.Now().Format("200601"), os.ModePerm)
+		if err != nil {
+			return
+		}
+
+		file, _ := os.OpenFile(that.config.Logs + "/" + time.Now().Format("200601") + "/" + time.Now().Format("2006010215") + ".txt", os.O_RDWR | os.O_CREATE | os.O_APPEND, 0666)
+		defer file.Close()
+
+		file.WriteString(data)
+	}(text.String(), this)
+}
+
+func (this *RabbitMQ) Connect() {
 	var err error
-	this.handle, err = beanstalk.Dial("tcp", this.config.Host + ":" + this.config.Port)
+	this.handle, err = amqp.Dial("amqp://" + this.config.User + ":" + this.config.Passwd + "@" + this.config.Host + ":" + this.config.Port + "/")
 	if err != nil {
-		this.log("mq.beanstalkd.Connect error:" + err.Error())
+		this.logger("mq.Connect error:" + err.Error())
+	}
+
+	this.channel, err = this.handle.Channel()
+	if err != nil {
+		this.logger("mq.DirectQueue.Channel error:" + err.Error())
 	}
 }
 
-func (this *beanstalkd) Close() {
-	if this.handle != nil {
+func (this *RabbitMQ) Close() {
+	if this.handle == nil {
+		return
+	}
+
+	if !this.handle.IsClosed() {
 		this.handle.Close()
+
+		if this.channel == nil {
+			return
+		}
+
+		this.channel.Close()
 	}
 }
 
-func (this *beanstalkd) UseTube(tube string) {
-	if this.handle == nil {
-		return
+func (this *RabbitMQ) DirectQueue(name string) *Queue {
+	queue := &Queue{
+		rabbitmq: this,
+		name: name,
 	}
 
-	this.handle.Tube.Name = tube
-	this.handle.TubeSet.Name[tube] = true
-}
-
-func (this *beanstalkd) FanoutTube(tube string) {
-	this.UseTube(tube)
-}
-
-func (this *beanstalkd) Watch(tube string) {
-
-}
-
-func (this *beanstalkd) Put(data string, level uint32, delay time.Duration) interface{} {
-	if this.handle == nil {
-		return 0
+	if this.handle == nil || this.channel == nil {
+		return queue
 	}
 
-	id, err := this.handle.Put([]byte(data), level, delay, 60 * time.Second)
+	err := this.channel.ExchangeDeclare(this.config.Exchange, amqp.ExchangeDirect, true, false, false, false, nil)
 	if err != nil {
-		this.log("mq.beanstalkd.Put error:" + err.Error())
-		return 0
+		this.logger("mq.DirectQueue.ExchangeDeclare error:" + err.Error())
 	}
 
-	return id
+	queue.queue, err = this.channel.QueueDeclare(this.config.Exchange + "." + name, true, false, false, false, nil)
+	if err != nil {
+		this.logger("mq.DirectQueue.QueueDeclare error:" + err.Error())
+		return queue
+	}
+
+	err = this.channel.QueueBind(this.config.Exchange + "." + name, name, this.config.Exchange, true, nil)
+	if err != nil {
+		this.logger("mq.DirectQueue.QueueBind error:" + err.Error())
+		return queue
+	}
+
+	return queue
 }
 
-func (this *beanstalkd) Reserve(fun ReserveMessageFunc) {
-	if this.handle == nil {
-		return
+func (this *RabbitMQ) FanoutQueue(name string) *Queue {
+	queue := &Queue{
+		rabbitmq: this,
+		name: name,
 	}
 
-	message := Message{}
-	id, body, err := this.handle.Reserve(1 * time.Second)
+	if this.handle == nil || this.channel == nil {
+		return queue
+	}
+
+	err := this.channel.ExchangeDeclare(this.config.Exchange, amqp.ExchangeFanout, true, false, false, false, nil)
 	if err != nil {
-		this.log("mq.beanstalkd.Reserve error:" + err.Error())
-		return
+		this.logger("mq.FanoutQueue.ExchangeDeclare error:" + err.Error())
 	}
 
-	message.Id = strconv.FormatUint(id, 10)
-	message.Body = string(body)
+	queue.queue, err = this.channel.QueueDeclare(this.config.Exchange + "." + name, true, false, false, false, nil)
+	if err != nil {
+		this.logger("mq.FanoutQueue.QueueDeclare error:" + err.Error())
+		return queue
+	}
 
-	fun(this, &message)
+	err = this.channel.QueueBind(this.config.Exchange + "." + name, name, this.config.Exchange, true, nil)
+	if err != nil {
+		this.logger("mq.FanoutQueue.QueueBind error:" + err.Error())
+		return queue
+	}
+
+	return queue
 }
 
-func (this *beanstalkd) Delete(message *Message) bool {
-	if this.handle == nil {
-		return false
+func New(config *Config) *RabbitMQ {
+	return &RabbitMQ{
+		config:config,
 	}
-
-	id, err := strconv.ParseUint(message.Id, 10, 64)
-	if err != nil {
-		this.log("mq.beanstalkd.Delete error:" + err.Error())
-		return false
-	}
-
-	err = this.handle.Delete(id)
-	if err != nil {
-		this.log("mq.beanstalkd.Delete error:" + err.Error())
-		return false
-	}
-
-	return true
 }
 
-func New(config *Config) MQ {
-	if config.Type == "rabbit" {
-		return &rabbitMQ{logger:logger{config:config}}
-	} else {
-		return &beanstalkd{logger:logger{config:config}}
-	}
+var handler *RabbitMQ
+
+func Init(config *Config) {
+	handler = New(config)
+	handler.Connect()
+}
+
+func DirectQueue(name string) *Queue {
+	return handler.DirectQueue(name)
+}
+
+func FanoutQueue(name string) *Queue {
+	return handler.FanoutQueue(name)
+}
+
+func Close() {
+	handler.Close()
 }
