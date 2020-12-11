@@ -3,7 +3,6 @@
 更新至2020-11-01  
 github.com/robfig/cron.git  
 github.com/streadway/amqp.git  
-github.com/beanstalkd/go-beanstalk.git  
 github.com/go-mgo/mgo.git  
 github.com/go-sql-driver/mysql.git   
 github.com/gomodule/redigo.git  
@@ -209,11 +208,11 @@ func main() {
 默认MySQL，支持主从库
 <pre>
 // 添加记录
-insertid := db.Insert("表名", db.Row{"字段名":"字段值", ...})
+insertid := db.Insert("表名", db.Row{"字段名":"字段值", ...参数})
 // 更新记录
-affected := db.Update("SQL语句", db.Row{"字段名":"字段值", ...}, "WHERE条件", ...参数)
+affected := db.Update("表名", "SQL语句", db.Row{"字段名":"字段值", ...}, "WHERE条件", ...参数)
 // 删除记录
-affected := db.DELETE("表名", "WHERE条件", ...参数)
+affected := db.Delete("表名", "WHERE条件", ...参数)
 // 获取单条记录
 row := db.FetchFirst("SQL语句", ...参数)
 // 获取多条记录
@@ -228,43 +227,81 @@ if err != nil {
     tx.Rollback()
 }
 
-// 查询
+// 表操作
 db.Table("表名").Insert(db.Row{})
 db.Table("表名").Where("id", "=", 1).Update(db.Row{})
 db.Table("表名").Where("id", "=", 1).Delete()
-db.Table("表名").Where("id", "=", 1).Find()
-db.Table("表名").Alias("a").Join("xxx", "").Where("id", ">", 1).Select()
+db.Table("表名").Where("id", "=", 1).First()
+db.Table("表名").Alias("a").Join("xxx", "").Where("id", ">", 1).Rows()
 
-Where方法
-
-结构体
+// 结构体
 user := User{name:""}
-users := []*User{}
+users := []User{}
+
 db.Table("表名").Save(&user)
-db.Table("表名").Where().One(&user)
-db.Table("表名").Where().Search(users)
+db.Table("表名").Where().Find(&user)
+db.Table("表名").Where().Search(&users)
+
+// 自定义连接
+database := db.New(&db.Config{
+    Host: "127.0.0.1",
+    Port: "3306",
+    User: "root",
+    Passwd: "mysql",
+    Database: "test",
+    Charset: "utf8mb4",
+    Logs: tec.LOG_PATH + "/mysql",
+})
+
+// 手动关闭
+database.Close()
 </pre>
 
 ###4.2.缓存
 默认使用Redis
 <pre>
-cache.常用方法,如Get、Set、SetNx
+cache.常用方法,如Get、Set、SetNx、Incr
+
+// 自定义连接
+redis := cache.New(&cache.Config{
+    Host: "127.0.0.1",
+    Port: "6379",
+    Prefix: "",
+    Logs: tec.LOG_PATH + "/redis",
+})
+
+// 手动关闭
+redis.Close()
 </pre>
 
 ###4.3.Mongodb 
 <pre>
+// 静态方法
 mongo.ListDBs()
 mongo.ListCollections("库名")
 mongo.CreateCollection("集合名")
 mongo.DropCollection("集合名")
 mongo.SelectCollection("库名", "集合名")
 
-集合方法
+// 集合方法
 Insert()
 Update()
 Remove()
 One()
 Find()
+
+// 自定义连接
+mongodb := mongo.New(&mongo.Config{
+    Host: "127.0.0.1",
+    Port: "27017",
+    User: "root",
+    Passwd: "",
+    Database: "admin",
+    Logs: tec.LOG_PATH + "/mongo",
+})
+
+// 手动关闭
+mongodb.Close()
 </pre>
 
 ###4.4.消息队列 
@@ -278,6 +315,20 @@ go mq.DirectQueue("demo").Reserve(func(queue *mq.Queue, message *mq.Message) {
     fmt.Println(message.Body)
     queue.Delete(message)
 })
+
+// 自定义连接
+rabbitMq := mq.New(&mq.Config{
+    Host: "127.0.0.1",
+    Port: "5672",
+    User: "guest",
+    Passwd:  "guest",
+    VHost: "/",
+    Exchange: "exchange",
+    Logs: tec.LOG_PATH + "/mq",
+})
+
+// 手动关闭
+rabbitMq.Close()
 </pre>
 
 ###4.5.图片 
