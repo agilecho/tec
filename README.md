@@ -203,8 +203,8 @@ func main() {
 }
 </pre>
 
-##4、工具类
-###4.1.数据库
+##4、工具类  
+###4.1.数据库  
 默认MySQL，支持主从库
 <pre>
 // 添加记录
@@ -257,7 +257,7 @@ database := db.New(&db.Config{
 database.Close()
 </pre>
 
-###4.2.缓存
+###4.2.缓存  
 默认使用Redis
 <pre>
 cache.常用方法,如Get、Set、SetNx、Incr
@@ -304,7 +304,7 @@ mongodb := mongo.New(&mongo.Config{
 mongodb.Close()
 </pre>
 
-###4.4.消息队列 
+###4.4.消息队列  
 默认使用RabbitMQ
 <pre>
 // 发送
@@ -372,7 +372,7 @@ pin.Pull(rpio.PullUp)
 rpio.Close()
 </pre>
 
-##5、部署
+##5、部署  
 1.编译 go build demo.go  
 2.打包 ./demo -zip  
 2.将demo.zip部署到服务器  

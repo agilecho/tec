@@ -1,6 +1,7 @@
 package tec
 
 import (
+	"archive/zip"
 	"bufio"
 	"bytes"
 	"crypto/aes"
@@ -577,6 +578,16 @@ func InArray(data interface{}, array interface{}) bool {
 	return false
 }
 
+func IndexArray(str string, finds []string) bool {
+	for _, find := range finds {
+		if strings.Index(str, find) != -1 {
+			return true
+		}
+	}
+
+	return false
+}
+
 func IsAnsi(data string) bool {
 	result, _ := regexp.Match(`^[\w\_\.]+$`, []byte(data))
 	return result
@@ -872,6 +883,7 @@ func Ini(path string) map[string]map[string]string {
 
 	return data
 }
+
 
 var loggerRWMutex sync.RWMutex
 
@@ -1173,16 +1185,133 @@ func init() {
 	HOST_NAME = GetHostName()
 	if len(os.Args) > 1 {
 		if os.Args[1] == "-zip" {
-			zipProject()
-			return
+			project := ROOT_PATH[strings.LastIndex(ROOT_PATH, string(byte(os.PathSeparator))) + 1:]
+			if len(os.Args) > 2 {
+				project = os.Args[2]
+			}
+
+			fmt.Println("zip project start...")
+
+			err := ZipDir(ROOT_PATH, ROOT_PATH + string(os.PathSeparator) + project + ".zip", []string{"logs", "pkg", "src", ".idea", "tmp"}, []string{".go", ".mod"})
+			if err != nil {
+				fmt.Println("zip project dir error:", err.Error())
+				os.Exit(0)
+			}
+
+			fmt.Println("zip file:", fmt.Sprintf("%s%s%s%s", ROOT_PATH, string(os.PathSeparator), project, ".zip"))
+			fmt.Println("zip project end")
+
+			os.Exit(0)
 		}
 
 		HOST_NAME = os.Args[1]
 	}
 }
 
-func zipProject() {
+type zipWriteFunc func(info os.FileInfo, file io.Reader, entryName string, fullPath string) error
 
+func zipDirExecute(dir, root, target string, ignorePath, ignoreExtension []string, writerFunc zipWriteFunc) error {
+	fileInfos, err := ioutil.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+
+	for _, info := range fileInfos {
+		full := filepath.Join(dir, info.Name())
+
+		if info.IsDir() && IndexArray(full, ignorePath) {
+			continue
+		} else if !info.IsDir() && (full == target || IndexArray(FileExt(full), ignoreExtension)) {
+			continue
+		}
+
+		var file *os.File
+		var reader io.Reader
+
+		if !info.IsDir() {
+			file, err = os.Open(full)
+			if err != nil {
+				return err
+			}
+
+			reader = file
+		}
+
+		subDir := strings.Replace(dir, root, "", 1)
+		if len(subDir) > 0 && subDir[0] == os.PathSeparator {
+			subDir = subDir[1:]
+		}
+
+		subDir = path.Join(strings.Split(subDir, string(os.PathSeparator))...)
+		entryName := path.Join(subDir, info.Name())
+		fullPath := path.Join(dir, info.Name())
+
+		if err := writerFunc(info, reader, entryName, fullPath); err != nil {
+			if file != nil {
+				file.Close()
+			}
+
+			return err
+		}
+
+		if file != nil {
+			if err := file.Close(); err != nil {
+				return err
+			}
+		}
+
+		if info.IsDir() {
+			if err := zipDirExecute(full, root, target, ignorePath, ignoreExtension, writerFunc); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+func ZipDir(dir, target string, ignorePath, ignoreExtension []string) error {
+	file, err := os.Create(target)
+	if err != nil {
+		return err
+	}
+
+	defer file.Close()
+
+	writer := zip.NewWriter(file)
+	defer writer.Close()
+
+	dir = path.Clean(dir)
+
+	return zipDirExecute(dir, dir, target, ignorePath, ignoreExtension, func(info os.FileInfo, file io.Reader, entryName string, fullPath string) error {
+		header, err := zip.FileInfoHeader(info)
+		if err != nil {
+			return err
+		}
+
+		if !info.IsDir() {
+			header.Method = zip.Deflate
+		}
+
+		header.Name = entryName
+
+		if info.IsDir() {
+			header.Name += "/"
+		}
+
+		writer, err := writer.CreateHeader(header)
+		if err != nil {
+			return err
+		}
+
+		if file != nil {
+			if _, err := io.Copy(writer, file); err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
 }
 
 func Exception(msgs ...string) {
