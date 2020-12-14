@@ -149,7 +149,7 @@ func main() {
     app.Run()
 }
 </pre>
-打开浏览器访问http://127.0.0.1:9500即可  
+打开浏览器访问http://localhost:9500  
 
 *WebSocket方式*
 <pre>
@@ -378,7 +378,7 @@ rpio.Close()
 2.将demo.zip部署到服务器  
 3.进入服务器目录中执行  
 <pre>
-unzip -l demo.zip
+unzip demo.zip -d 指定目录
 
 使用本机hostname配置文件ini
 ./demo >demo.log 2>&1 &

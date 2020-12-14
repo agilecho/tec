@@ -1192,7 +1192,7 @@ func init() {
 
 			fmt.Println("zip project start...")
 
-			err := ZipDir(ROOT_PATH, ROOT_PATH + string(os.PathSeparator) + project + ".zip", []string{"logs", "pkg", "src", ".idea", "tmp"}, []string{".go", ".mod"})
+			err := ZipDir(ROOT_PATH, ROOT_PATH + string(os.PathSeparator) + project + ".zip", []string{"logs", "pkg", "src", ".idea", "tmp"}, []string{".go", ".mod", ".exe"})
 			if err != nil {
 				fmt.Println("zip project dir error:", err.Error())
 				os.Exit(0)
