@@ -1,6 +1,6 @@
 ##1.第三方库
 原库已集成至代码库，无须重新安装，部分代码已精简  
-更新至2020-11-01  
+更新至2021-01-01  
 github.com/robfig/cron.git  
 github.com/streadway/amqp.git  
 github.com/go-mgo/mgo.git  
@@ -148,6 +148,16 @@ func main() {
     
     app.Run()
 }
+
+// 路由
+app.Router.Add("地址", Handler)
+地址规则:/模块/控制器/方法
+空 解析结果 /home/index/index
+/a/b/c 解析结果 /a/b/c
+/a/b 解析结果 /a/b/index
+/a 解析结果 /a/index/index
+
+不支持地址变量
 </pre>
 打开浏览器访问http://localhost:9500  
 

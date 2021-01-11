@@ -699,7 +699,7 @@ func FormatBytes(size int64) string {
 }
 
 func FormatDiscount(discount float64) string {
-	return strconv.FormatFloat(discount, 'f', -1, 32)
+	return strconv.FormatFloat(discount, 'f', -1, 64)
 }
 
 func FormatMobilePrivacy(mobile string) string {

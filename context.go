@@ -455,6 +455,11 @@ func (this *Context) Render(file string, data map[string]interface{}) {
 	this.Response.Header().Set("Content-Type", "text/html")
 	this.Response.Header().Set("Charset", "UTF-8")
 
+	if !FileExists(CONFIG.Template.Path + file + CONFIG.Template.Extension) {
+		this.Json(Result{Code: 404, Msg: "can not find template file path:" + file})
+		return
+	}
+
 	files := []string{CONFIG.Template.Path + file + CONFIG.Template.Extension}
 
 	if CONFIG.Template.Define != "" {

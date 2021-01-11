@@ -9,27 +9,31 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/url"
+	"regexp"
 	"strconv"
 	"sync"
 	"time"
 )
 
-var (
-	_ ConnWithTimeout = (*conn)(nil)
-)
+var _ ConnWithTimeout = (*conn)(nil)
 
 type conn struct {
 	mu sync.Mutex
 	pending int
 	err error
 	conn net.Conn
-
 	readTimeout time.Duration
 	br *bufio.Reader
+
 	writeTimeout time.Duration
 	bw *bufio.Writer
 	lenScratch [32]byte
 	numScratch [40]byte
+}
+
+func DialTimeout(network, address string, connectTimeout, readTimeout, writeTimeout time.Duration) (Conn, error) {
+	return Dial(network, address, DialConnectTimeout(connectTimeout), DialReadTimeout(readTimeout), DialWriteTimeout(writeTimeout))
 }
 
 type DialOption struct {
@@ -39,6 +43,7 @@ type DialOption struct {
 type dialOptions struct {
 	readTimeout time.Duration
 	writeTimeout time.Duration
+	tlsHandshakeTimeout time.Duration
 	dialer *net.Dialer
 	dialContext func(ctx context.Context, network, addr string) (net.Conn, error)
 	db int
@@ -48,6 +53,12 @@ type dialOptions struct {
 	useTLS bool
 	skipVerify bool
 	tlsConfig *tls.Config
+}
+
+func DialTLSHandshakeTimeout(d time.Duration) DialOption {
+	return DialOption{func(do *dialOptions) {
+		do.tlsHandshakeTimeout = d
+	}}
 }
 
 func DialReadTimeout(d time.Duration) DialOption {
@@ -134,12 +145,27 @@ func Dial(network, address string, options ...DialOption) (Conn, error) {
 	return DialContext(context.Background(), network, address, options...)
 }
 
+type tlsHandshakeTimeoutError struct{}
+
+func (tlsHandshakeTimeoutError) Timeout() bool {
+	return true
+}
+
+func (tlsHandshakeTimeoutError) Temporary() bool {
+	return true
+}
+
+func (tlsHandshakeTimeoutError) Error() string {
+	return "TLS handshake timeout"
+}
+
 func DialContext(ctx context.Context, network, address string, options ...DialOption) (Conn, error) {
-	fmt.Println(network, address, options)
 	do := dialOptions{
 		dialer: &net.Dialer{
+			Timeout:   time.Second * 30,
 			KeepAlive: time.Minute * 5,
 		},
+		tlsHandshakeTimeout: time.Second * 10,
 	}
 	for _, option := range options {
 		option.f(&do)
@@ -170,10 +196,23 @@ func DialContext(ctx context.Context, network, address string, options ...DialOp
 		}
 
 		tlsConn := tls.Client(netConn, tlsConfig)
-		if err := tlsConn.Handshake(); err != nil {
+		errc := make(chan error, 2)
+		if d := do.tlsHandshakeTimeout; d != 0 {
+			timer := time.AfterFunc(d, func() {
+				errc <- tlsHandshakeTimeoutError{}
+			})
+			defer timer.Stop()
+		}
+
+		go func() {
+			errc <- tlsConn.Handshake()
+		}()
+
+		if err := <-errc; err != nil {
 			netConn.Close()
 			return nil, err
 		}
+
 		netConn = tlsConn
 	}
 
@@ -181,7 +220,7 @@ func DialContext(ctx context.Context, network, address string, options ...DialOp
 		conn: netConn,
 		bw: bufio.NewWriter(netConn),
 		br: bufio.NewReader(netConn),
-		readTimeout: do.readTimeout,
+		readTimeout:  do.readTimeout,
 		writeTimeout: do.writeTimeout,
 	}
 
@@ -212,6 +251,70 @@ func DialContext(ctx context.Context, network, address string, options ...DialOp
 	}
 
 	return c, nil
+}
+
+var pathDBRegexp = regexp.MustCompile(`/(\d*)\z`)
+
+func DialURL(rawurl string, options ...DialOption) (Conn, error) {
+	u, err := url.Parse(rawurl)
+	if err != nil {
+		return nil, err
+	}
+
+	if u.Scheme != "redis" && u.Scheme != "rediss" {
+		return nil, fmt.Errorf("invalid redis URL scheme: %s", u.Scheme)
+	}
+
+	if u.Opaque != "" {
+		return nil, fmt.Errorf("invalid redis URL, url is opaque: %s", rawurl)
+	}
+
+	host, port, err := net.SplitHostPort(u.Host)
+	if err != nil {
+		host = u.Host
+		port = "6379"
+	}
+	if host == "" {
+		host = "localhost"
+	}
+	address := net.JoinHostPort(host, port)
+
+	if u.User != nil {
+		password, isSet := u.User.Password()
+		if isSet {
+			options = append(options, DialUsername(u.User.Username()), DialPassword(password))
+		}
+	}
+
+	match := pathDBRegexp.FindStringSubmatch(u.Path)
+	if len(match) == 2 {
+		db := 0
+		if len(match[1]) > 0 {
+			db, err = strconv.Atoi(match[1])
+			if err != nil {
+				return nil, fmt.Errorf("invalid database: %s", u.Path[1:])
+			}
+		}
+		if db != 0 {
+			options = append(options, DialDatabase(db))
+		}
+	} else if u.Path != "" {
+		return nil, fmt.Errorf("invalid database: %s", u.Path[1:])
+	}
+
+	options = append(options, DialUseTLS(u.Scheme == "rediss"))
+
+	return Dial("tcp", address, options...)
+}
+
+func NewConn(netConn net.Conn, readTimeout, writeTimeout time.Duration) Conn {
+	return &conn{
+		conn:         netConn,
+		bw:           bufio.NewWriter(netConn),
+		br:           bufio.NewReader(netConn),
+		readTimeout:  readTimeout,
+		writeTimeout: writeTimeout,
+	}
 }
 
 func (c *conn) Close() error {
@@ -501,6 +604,7 @@ func (c *conn) ReceiveWithTimeout(timeout time.Duration) (reply interface{}, err
 	if reply, err = c.readReply(); err != nil {
 		return nil, c.fatal(err)
 	}
+
 	c.mu.Lock()
 	if c.pending > 0 {
 		c.pending -= 1
