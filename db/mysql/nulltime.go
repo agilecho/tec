@@ -1,17 +1,13 @@
 package mysql
 
 import (
+	"database/sql"
 	"database/sql/driver"
 	"fmt"
 	"time"
 )
 
-type NullTime struct {
-	Time  time.Time
-	Valid bool
-}
-
-type nullTime = NullTime
+type NullTime sql.NullTime
 
 func (nt *NullTime) Scan(value interface{}) (err error) {
 	if value == nil {

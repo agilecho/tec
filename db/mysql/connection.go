@@ -590,3 +590,7 @@ func (mc *mysqlConn) ResetSession(ctx context.Context) error {
 	mc.reset = true
 	return nil
 }
+
+func (mc *mysqlConn) IsValid() bool {
+	return !mc.closed.IsSet()
+}

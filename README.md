@@ -1,6 +1,6 @@
 ##1.第三方库
 原库已集成至代码库，无须重新安装，部分代码已精简  
-更新至2021-01-01  
+更新至2021-06-01  
 github.com/robfig/cron.git  
 github.com/streadway/amqp.git  
 github.com/go-mgo/mgo.git  
@@ -122,26 +122,27 @@ import (
 
 func main() {
     app := tec.New()
-
+    
+    // 添加默认路由
     app.Router.Add("", func(ctx *tec.Context) {
         ctx.Text("hello world.")
     })
-
+    // 应用启动时执行
     app.Start(func(app *tec.App) {
         cron.Add(app.Config.Cron.Schedules["test"], func() {
             fmt.Println(tec.Microtime())
         }).Start()
     })
-
+    // 没有发现路由时执行
     app.Empty(func(ctx *tec.Context){
         ctx.Text("not find")
     })
-
+    // 路由执行前过滤器
     app.Before(func(ctx *tec.Context) bool {
         fmt.Println("handler filter")
         return true
     })
-
+    // 路由执行后过滤器
     app.After(func(ctx *tec.Context, method string, data interface{}) {
         fmt.Println("context response")
     })
@@ -173,19 +174,23 @@ import (
 
 func main() {
     app := tec.New()
-
+    
+    // 广播
     app.Bind("push", func(req *ws.Request) {
         fmt.Println("ws push")
     })
-
+    
+    // 连接
     app.Bind("connect", func(req *ws.Request) {
         fmt.Println("ws connect")
     })
-
+    
+    // 发送消息
     app.Bind("message", func (req *ws.Request, message string) {
         fmt.Println("ws message")
     })
-
+    
+    // 断开
     app.Bind("close", func(req *ws.Request) {
         fmt.Println("ws close")
     })
@@ -357,7 +362,15 @@ img.Thumb("图片路径", image.Option{})
 img.Save()
 </pre>
 
-###4.6.Rpio 
+###4.6.定时任务 
+<pre>
+// 定时任务
+cron.Add("cron表达式", func() {
+    fmt.Println("hello world.")
+}).Start()
+</pre>
+
+###4.7.Rpio 
 <pre>
 err := rpio.Open()
 

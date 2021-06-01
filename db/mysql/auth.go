@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/pem"
+	"fmt"
 	"sync"
 )
 
@@ -273,7 +274,10 @@ func (mc *mysqlConn) handleAuthResult(oldAuthData []byte, plugin string) error {
 							return err
 						}
 
-						block, _ := pem.Decode(data[1:])
+						block, rest := pem.Decode(data[1:])
+						if block == nil {
+							return fmt.Errorf("No Pem data found, data: %s", rest)
+						}
 						pkix, err := x509.ParsePKIXPublicKey(block.Bytes)
 						if err != nil {
 							return err

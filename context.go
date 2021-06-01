@@ -508,6 +508,14 @@ func (this *Context) Render(file string, data map[string]interface{}) {
 
 		"Loop": Loop,
 		"Pager": Pager,
+
+		"EQ": func(param map[string]string, key, value string) bool {
+			if val, ok := param[key]; ok {
+				return  value == val
+			}
+
+			return false
+		},
 	})
 
 	tpl, err := tpl.ParseFiles(files...)
